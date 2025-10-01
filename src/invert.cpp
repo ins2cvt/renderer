@@ -21,11 +21,18 @@ const std::array<const char *, 1> requiredDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
+struct Dimensions
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
 // TODO: Replace with a proper interface after factoring classes out.
 class WindowInterface
 {
 public:
     virtual VkResult createVulkanSurface(VkInstance instance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface) = 0;
+    virtual Dimensions getDimensions() = 0;
 };
 
 class Renderer
@@ -92,7 +99,102 @@ public:
     // TODO: Replace with proper interface after factoring relevant class out.
     Renderer(WindowInterface *windowInterface) : windowInterface(windowInterface) {}
 
+    void createSwapchain()
+    {
+        VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities);
+
+        VkExtent2D extent = {};
+
+        if (surfaceCapabilities.currentExtent.width != UINT32_MAX)
+        {
+            extent = surfaceCapabilities.currentExtent;
+        }
+        else
+        {
+            Dimensions dimensions = windowInterface->getDimensions();
+            extent = {
+                .width = dimensions.width,
+                .height = dimensions.height,
+            };
+        }
+
+        uint32_t surfaceFormatCount = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount, NULL);
+        std::vector<VkSurfaceFormatKHR> surfaceFormats(surfaceFormatCount);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(physicalDevice, surface, &surfaceFormatCount, surfaceFormats.data());
+
+        VkSurfaceFormatKHR swapchainSurfaceFormat = {};
+
+        for (const auto &surfaceFormat : surfaceFormats)
+        {
+            if (surfaceFormat.format == VK_FORMAT_B8G8R8A8_SRGB && surfaceFormat.colorSpace == VK_COLORSPACE_SRGB_NONLINEAR_KHR)
+            {
+                swapchainSurfaceFormat = surfaceFormat;
+                break;
+            }
+        }
+
+        uint32_t minImageCount = surfaceCapabilities.minImageCount + 1;
+
+        if (minImageCount > surfaceCapabilities.maxImageCount)
+            minImageCount = surfaceCapabilities.maxImageCount;
+
+        VkSwapchainCreateInfoKHR swapchainInfo = {
+            .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+            .surface = surface,
+            .minImageCount = minImageCount,
+            .imageFormat = swapchainSurfaceFormat.format,
+            .imageColorSpace = swapchainSurfaceFormat.colorSpace,
+            .imageExtent = extent,
+            .imageArrayLayers = 1,
+            .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+            .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 1,
+            .pQueueFamilyIndices = &familyIndex,
+            .preTransform = surfaceCapabilities.currentTransform,
+            .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+            .presentMode = VK_PRESENT_MODE_FIFO_KHR,
+            .clipped = VK_TRUE,
+        };
+
+        if (vkCreateSwapchainKHR(device, &swapchainInfo, NULL, &swapchain) != VK_SUCCESS)
+            printf("Failed to create swapchain\n");
+
+        uint32_t imageCount = 0;
+        vkGetSwapchainImagesKHR(device, swapchain, &imageCount, NULL);
+        swapchainImages = std::vector<VkImage>(imageCount);
+        vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data());
+
+        VkImageViewCreateInfo viewInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = swapchainSurfaceFormat.format,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        swapchainImageViews = std::vector<VkImageView>(imageCount);
+
+        for (uint32_t i = 0; i < imageCount; i++)
+        {
+            viewInfo.image = swapchainImages[i];
+            vkCreateImageView(device, &viewInfo, NULL, &swapchainImageViews[i]);
+        }
+    }
+
     void initialize()
+    {
+        initializeVulkan();
+        createSwapchain();
+    }
+
+    void initializeVulkan()
     {
         // Instance
 
@@ -187,7 +289,7 @@ public:
             std::vector<VkQueueFamilyProperties2> queueFamilyProperties(queueFamilyPropertyCount, emptyQueueFamilyProperties);
             vkGetPhysicalDeviceQueueFamilyProperties2(physicalDeviceCandidate, &queueFamilyPropertyCount, queueFamilyProperties.data());
 
-            graphicsQueueFamilyIndex = UINT32_MAX;
+            familyIndex = UINT32_MAX;
 
             for (uint32_t i = 0; i < queueFamilyPropertyCount; i++)
             {
@@ -198,7 +300,7 @@ public:
                     if (vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDeviceCandidate, i) == VK_FALSE)
                         continue;
 
-                    graphicsQueueFamilyIndex = i;
+                    familyIndex = i;
                     break;
                 }
             }
@@ -214,14 +316,14 @@ public:
 
             // Logical device and queues
 
-            if ((graphicsQueueFamilyIndex != UINT32_MAX) && supportsVulkan1_4)
+            if ((familyIndex != UINT32_MAX) && supportsVulkan1_4)
             {
                 physicalDevice = physicalDeviceCandidate;
 
                 float queuePriorities = 0.0f;
                 VkDeviceQueueCreateInfo deviceQueueInfo = {
                     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                    .queueFamilyIndex = graphicsQueueFamilyIndex,
+                    .queueFamilyIndex = familyIndex,
                     .queueCount = 1,
                     .pQueuePriorities = &queuePriorities,
                 };
@@ -244,7 +346,7 @@ public:
                 if (supportsVulkan1_4 == false)
                     printf("%s does not support Vulkan 1.4\n", physicalDeviceProperties.properties.deviceName);
 
-                if (graphicsQueueFamilyIndex == UINT32_MAX)
+                if (familyIndex == UINT32_MAX)
                     printf("%s does not expose a queue with both graphics and present support\n", physicalDeviceProperties.properties.deviceName);
             }
         }
@@ -253,7 +355,7 @@ public:
             printf("Failed to create surface\n");
 
         VkBool32 isSurfaceSupportedByPhysicalDevice = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, graphicsQueueFamilyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
+        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, familyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
 
         if (isSurfaceSupportedByPhysicalDevice == VK_FALSE)
             printf("Surface is not supported by physical device\n");
@@ -262,7 +364,14 @@ public:
     ~Renderer()
     {
         if (device != NULL)
+        {
+            for (auto &view : swapchainImageViews)
+                vkDestroyImageView(device, view, NULL);
+            if (swapchain != NULL)
+                vkDestroySwapchainKHR(device, swapchain, NULL);
+
             vkDestroyDevice(device, NULL);
+        }
 
         if (instance != NULL)
         {
@@ -285,7 +394,12 @@ private:
 
     VkPhysicalDevice physicalDevice = NULL;
     VkDevice device = NULL;
-    uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
+    // Graphics and present queue family index.
+    uint32_t familyIndex = UINT32_MAX;
+
+    VkSwapchainKHR swapchain = NULL;
+    std::vector<VkImage> swapchainImages = {};
+    std::vector<VkImageView> swapchainImageViews = {};
 };
 
 class Window : WindowInterface
@@ -346,6 +460,19 @@ public:
         };
 
         return vkCreateWin32SurfaceKHR(instance, &win32SurfaceInfo, pAllocator, pSurface);
+    }
+
+    Dimensions getDimensions() override
+    {
+        RECT rect = {};
+        GetClientRect(m_hWnd, &rect);
+
+        Dimensions result = {
+            .width = (uint32_t)rect.right,
+            .height = (uint32_t)rect.bottom,
+        };
+
+        return result;
     }
 
 private:
