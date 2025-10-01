@@ -10,7 +10,13 @@
 			],
 			"group": "build",
 			"problemMatcher": ["$msCompile"],
-			"detail": "CMake template build task"
+			"detail": "CMake template build task",
+			"dependsOn": "Compile shader"
+		},
+		{
+			"type": "shell",
+			"label": "Compile shader",
+			"command": "pwsh ./compile-shader.ps1 ./src/shader.slang ${command:cmake.launchTargetDirectory}/shader.spv"
 		}
 	]
 }
