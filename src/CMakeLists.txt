@@ -1,7 +1,8 @@
 add_executable(invert invert.cpp)
 set_target_properties(invert PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-target_include_directories(invert SYSTEM PRIVATE $ENV{USR_INC})
-target_link_directories(invert PRIVATE $ENV{USR_LIB})
+target_include_directories(invert SYSTEM PRIVATE $ENV{USR_INC} $ENV{VULKAN_SDK}/Include)
+target_link_directories(invert PRIVATE $ENV{USR_LIB} $ENV{VULKAN_SDK}/Lib)
+target_link_libraries(invert PRIVATE vulkan-1)
 add_compile_options(/W4 /utf-8)
 
 if(NOT MSVC)
