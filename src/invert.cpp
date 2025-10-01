@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
 #include <iostream>
@@ -10,10 +11,21 @@ const std::array<const char *, 1> requiredInstanceLayers = {
     "VK_LAYER_KHRONOS_validation",
 };
 
-std::array<const char *, 3> requiredInstanceExtensions = {
-    "VK_KHR_surface",
-    "VK_KHR_win32_surface",
-    "VK_EXT_debug_utils",
+const std::array<const char *, 3> requiredInstanceExtensions = {
+    VK_KHR_SURFACE_EXTENSION_NAME,
+    VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+    VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
+};
+
+const std::array<const char *, 1> requiredDeviceExtensions = {
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+};
+
+// TODO: Replace with a proper interface after factoring classes out.
+class WindowInterface
+{
+public:
+    virtual VkResult createVulkanSurface(VkInstance instance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface) = 0;
 };
 
 class Renderer
@@ -46,16 +58,16 @@ public:
         switch (messageSeverity)
         {
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT:
-            severityColor = "\x1b[37m";
+            severityColor = "\x1b[37m[VERBOSE: ";
             break;
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT:
-            severityColor = "\x1b[34m";
+            severityColor = "\x1b[34m[INFO: ";
             break;
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
-            severityColor = "\x1b[33m";
+            severityColor = "\x1b[33m[WARNING: ";
             break;
         case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
-            severityColor = "\x1b[31m";
+            severityColor = "\x1b[31m[ERROR: ";
         }
 
         const char *messagePrefix = NULL;
@@ -63,22 +75,27 @@ public:
         switch (messageTypes)
         {
         case VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT:
-            messagePrefix = "[GENERAL] ";
+            messagePrefix = "GENERAL] ";
             break;
         case VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT:
-            messagePrefix = "[VALIDATION] ";
+            messagePrefix = "VALIDATION] ";
             break;
         case VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT:
-            messagePrefix = "[PERFORMANCE] ";
+            messagePrefix = "PERFORMANCE] ";
         }
 
-        std::format("%s%s%s\e[m\n", severityColor, messagePrefix, pCallbackData->pMessage);
+        printf("%s%s%s\x1b[m\n", severityColor, messagePrefix, pCallbackData->pMessage);
 
         return VK_TRUE;
     }
 
-    Renderer()
+    // TODO: Replace with proper interface after factoring relevant class out.
+    Renderer(WindowInterface *windowInterface) : windowInterface(windowInterface) {}
+
+    void initialize()
     {
+        // Instance
+
         VkApplicationInfo applicationInfo = {
             .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
             .apiVersion = VK_API_VERSION_1_4,
@@ -125,11 +142,19 @@ public:
             }
 
             if (supported == false)
-                printf("Instance extensionnot supported: %s\n", requiredInstanceExtension);
+                printf("Instance extension not supported: %s\n", requiredInstanceExtension);
         }
+
+        VkDebugUtilsMessengerCreateInfoEXT messengerInfo = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+            .pfnUserCallback = debugMessage,
+        };
 
         VkInstanceCreateInfo instanceInfo = {
             .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+            .pNext = &messengerInfo,
             .pApplicationInfo = &applicationInfo,
             .enabledLayerCount = (uint32_t)requiredInstanceLayers.size(),
             .ppEnabledLayerNames = requiredInstanceLayers.data(),
@@ -140,21 +165,109 @@ public:
         if (vkCreateInstance(&instanceInfo, NULL, &instance) != VK_SUCCESS)
             printf("Failed to create Vulkan instance\n");
 
-        VkDebugUtilsMessengerCreateInfoEXT messengerInfo = {
-            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-            .pfnUserCallback = debugMessage,
-        };
-
         if (vkCreateDebugUtilsMessengerEXT(instance, &messengerInfo, NULL, &messenger) != VK_SUCCESS)
             printf("Failed to create Vulkan Debug Utils Messenger\n");
+
+        // Physical device
+
+        uint32_t physicalDeviceCount = 0;
+        vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, NULL);
+        std::vector<VkPhysicalDevice> physicalDevices(physicalDeviceCount);
+        vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices.data());
+
+        for (const auto &physicalDeviceCandidate : physicalDevices)
+        {
+            // Queue with graphics and present support
+
+            uint32_t queueFamilyPropertyCount = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties2(physicalDeviceCandidate, &queueFamilyPropertyCount, NULL);
+            const VkQueueFamilyProperties2 emptyQueueFamilyProperties = {
+                .sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2,
+            };
+            std::vector<VkQueueFamilyProperties2> queueFamilyProperties(queueFamilyPropertyCount, emptyQueueFamilyProperties);
+            vkGetPhysicalDeviceQueueFamilyProperties2(physicalDeviceCandidate, &queueFamilyPropertyCount, queueFamilyProperties.data());
+
+            graphicsQueueFamilyIndex = UINT32_MAX;
+
+            for (uint32_t i = 0; i < queueFamilyPropertyCount; i++)
+            {
+                const auto &queueFamilyProperty = queueFamilyProperties[i].queueFamilyProperties;
+
+                if (queueFamilyProperty.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+                {
+                    if (vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDeviceCandidate, i) == VK_FALSE)
+                        continue;
+
+                    graphicsQueueFamilyIndex = i;
+                    break;
+                }
+            }
+
+            // API version
+
+            VkPhysicalDeviceProperties2 physicalDeviceProperties = {
+                .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            };
+            vkGetPhysicalDeviceProperties2(physicalDeviceCandidate, &physicalDeviceProperties);
+
+            bool supportsVulkan1_4 = physicalDeviceProperties.properties.apiVersion >= VK_API_VERSION_1_4;
+
+            // Logical device and queues
+
+            if ((graphicsQueueFamilyIndex != UINT32_MAX) && supportsVulkan1_4)
+            {
+                physicalDevice = physicalDeviceCandidate;
+
+                float queuePriorities = 0.0f;
+                VkDeviceQueueCreateInfo deviceQueueInfo = {
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    .queueFamilyIndex = graphicsQueueFamilyIndex,
+                    .queueCount = 1,
+                    .pQueuePriorities = &queuePriorities,
+                };
+
+                VkDeviceCreateInfo deviceInfo = {
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                    .queueCreateInfoCount = 1,
+                    .pQueueCreateInfos = &deviceQueueInfo,
+                    .enabledExtensionCount = (uint32_t)requiredDeviceExtensions.size(),
+                    .ppEnabledExtensionNames = requiredDeviceExtensions.data(),
+                };
+
+                if (vkCreateDevice(physicalDevice, &deviceInfo, NULL, &device) != VK_SUCCESS)
+                    printf("Failed to create logical device\n");
+
+                break;
+            }
+            else
+            {
+                if (supportsVulkan1_4 == false)
+                    printf("%s does not support Vulkan 1.4\n", physicalDeviceProperties.properties.deviceName);
+
+                if (graphicsQueueFamilyIndex == UINT32_MAX)
+                    printf("%s does not expose a queue with both graphics and present support\n", physicalDeviceProperties.properties.deviceName);
+            }
+        }
+
+        if (windowInterface->createVulkanSurface(instance, NULL, &surface) != VK_SUCCESS)
+            printf("Failed to create surface\n");
+
+        VkBool32 isSurfaceSupportedByPhysicalDevice = VK_FALSE;
+        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, graphicsQueueFamilyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
+
+        if (isSurfaceSupportedByPhysicalDevice == VK_FALSE)
+            printf("Surface is not supported by physical device\n");
     }
 
     ~Renderer()
     {
+        if (device != NULL)
+            vkDestroyDevice(device, NULL);
+
         if (instance != NULL)
         {
+            if (surface != NULL)
+                vkDestroySurfaceKHR(instance, surface, NULL);
             if (messenger != NULL)
                 vkDestroyDebugUtilsMessengerEXT(instance, messenger, NULL);
 
@@ -163,11 +276,19 @@ public:
     }
 
 private:
+    // TODO: Replace with proper interface after factoring parent class out.
+    WindowInterface *windowInterface = nullptr;
+
     VkInstance instance = NULL;
     VkDebugUtilsMessengerEXT messenger = NULL;
+    VkSurfaceKHR surface = NULL;
+
+    VkPhysicalDevice physicalDevice = NULL;
+    VkDevice device = NULL;
+    uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
 };
 
-class Window
+class Window : WindowInterface
 {
 public:
     Window(HINSTANCE hInstance)
@@ -213,11 +334,28 @@ public:
         }
     }
 
+    VkResult createVulkanSurface(VkInstance instance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface) override
+    {
+        HINSTANCE hInstance = NULL;
+        GetModuleHandleExA(NULL, NULL, &hInstance);
+
+        VkWin32SurfaceCreateInfoKHR win32SurfaceInfo = {
+            .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
+            .hinstance = hInstance,
+            .hwnd = m_hWnd,
+        };
+
+        return vkCreateWin32SurfaceKHR(instance, &win32SurfaceInfo, pAllocator, pSurface);
+    }
+
 private:
     LRESULT handleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         switch (uMsg)
         {
+        case WM_CREATE:
+            renderer.initialize();
+            break;
         case WM_DESTROY:
             PostQuitMessage(0);
             break;
@@ -227,12 +365,13 @@ private:
     }
 
     HWND m_hWnd = NULL;
-    Renderer renderer = Renderer();
+
+    Renderer renderer = Renderer(this);
 };
 
 int main(int argc, char *argv[])
 {
-    printf("Hello, World!");
+    printf("Hello, World!\n");
 
     HINSTANCE hInstance = NULL;
     GetModuleHandleExA(NULL, NULL, &hInstance);
