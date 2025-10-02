@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <processthreadsapi.h>
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -6,6 +7,9 @@
 #include <iostream>
 #include <array>
 #include <vector>
+#include <memory>
+
+const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 const std::array<const char *, 1> requiredInstanceLayers = {
     "VK_LAYER_KHRONOS_validation",
@@ -37,6 +41,8 @@ public:
     virtual VkResult createVulkanSurface(VkInstance instance, const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface) = 0;
     virtual Dimensions getDimensions() = 0;
 };
+
+DWORD createRendererThread(LPVOID lpParameter);
 
 class Renderer
 {
@@ -100,27 +106,36 @@ public:
     }
 
     // TODO: Replace with proper interface after factoring relevant class out.
-    Renderer(WindowInterface *windowInterface) : windowInterface(windowInterface) {}
+    Renderer(WindowInterface *windowInterface) : windowInterface(windowInterface)
+    {
+        initializeVulkan();
+        initializeVulkanResources();
+        mainLoop();
+    }
 
     ~Renderer()
     {
-
         if (device != NULL)
         {
-            if (drawFence != NULL)
-                vkDestroyFence(device, drawFence, NULL);
-            if (presentCompleteSemaphore != NULL)
-                vkDestroySemaphore(device, presentCompleteSemaphore, NULL);
-            if (renderFinishedSemaphore != NULL)
-                vkDestroySemaphore(device, renderFinishedSemaphore, NULL);
+            for (auto &fence : inflightFences)
+                if (fence != NULL)
+                    vkDestroyFence(device, fence, NULL);
+            for (auto &semaphore : presentCompleteSemaphores)
+                if (semaphore != NULL)
+                    vkDestroySemaphore(device, semaphore, NULL);
+            for (auto &semaphore : renderFinishedSemaphores)
+                if (semaphore != NULL)
+                    vkDestroySemaphore(device, semaphore, NULL);
+            if (commandBuffers.size() > 0)
+                vkFreeCommandBuffers(device, commandPool, MAX_FRAMES_IN_FLIGHT, commandBuffers.data());
             if (commandPool != NULL)
                 vkDestroyCommandPool(device, commandPool, NULL);
-            if (shaderModule != NULL)
-                vkDestroyShaderModule(device, shaderModule, NULL);
             if (pipeline != NULL)
                 vkDestroyPipeline(device, pipeline, NULL);
             if (pipelineLayout != NULL)
                 vkDestroyPipelineLayout(device, pipelineLayout, NULL);
+            if (shaderModule != NULL)
+                vkDestroyShaderModule(device, shaderModule, NULL);
             for (auto &view : swapchainImageViews)
                 vkDestroyImageView(device, view, NULL);
             if (swapchain != NULL)
@@ -140,19 +155,11 @@ public:
         }
     }
 
-    void initialize()
-    {
-        initializeVulkan();
-        initializeVulkanResources();
-        mainLoop();
-    }
-
     void mainLoop()
     {
         for (;;)
         {
             drawFrame();
-            break;
         }
 
         vkDeviceWaitIdle(device);
@@ -160,42 +167,53 @@ public:
 
     void drawFrame()
     {
-        vkQueueWaitIdle(queue);
+        while (vkWaitForFences(device, 1, &inflightFences[currentFrame], VK_TRUE, UINT64_MAX) == VK_TIMEOUT)
+            ;
 
-        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, presentCompleteSemaphore, VK_NULL_HANDLE, &imageIndex);
-        recordCommandBuffer();
+        uint32_t imageIndex = 0;
 
-        vkResetFences(device, 1, &drawFence);
+        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, presentCompleteSemaphores[semaphoreIndex], VK_NULL_HANDLE, &imageIndex);
+        vkResetFences(device, 1, &inflightFences[currentFrame]);
+        vkResetCommandBuffer(commandBuffers[currentFrame], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+        recordCommandBuffer(imageIndex);
 
         VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &presentCompleteSemaphore,
+            .pWaitSemaphores = &presentCompleteSemaphores[semaphoreIndex],
             .pWaitDstStageMask = &waitDestinationStageMask,
             .commandBufferCount = 1,
-            .pCommandBuffers = &commandBuffer,
+            .pCommandBuffers = &commandBuffers[currentFrame],
             .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &renderFinishedSemaphore,
+            .pSignalSemaphores = &renderFinishedSemaphores[imageIndex],
         };
 
-        vkQueueSubmit(queue, 1, &submitInfo, drawFence);
-
-        while (vkWaitForFences(device, 1, &drawFence, VK_TRUE, UINT32_MAX))
-            ;
+        vkQueueSubmit(queue, 1, &submitInfo, inflightFences[currentFrame]);
 
         VkPresentInfoKHR presentInfo = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
             .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &renderFinishedSemaphore,
+            .pWaitSemaphores = &renderFinishedSemaphores[imageIndex],
             .swapchainCount = 1,
             .pSwapchains = &swapchain,
             .pImageIndices = &imageIndex,
         };
 
-        if (vkQueuePresentKHR(queue, &presentInfo) != VK_SUCCESS)
-            printf("Presentation failed\n");
+        switch (VkResult result = vkQueuePresentKHR(queue, &presentInfo))
+        {
+        case VK_SUCCESS:
+            break;
+        case VK_SUBOPTIMAL_KHR:
+            printf("Suboptimal swapchain properties for surface\n");
+            break;
+        default:
+            printf("Unexpected present error %d\n", result);
+        }
+
+        semaphoreIndex = (semaphoreIndex + 1) % presentCompleteSemaphores.size();
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
     void initializeVulkan()
@@ -391,7 +409,7 @@ public:
             printf("Surface is not supported by physical device\n");
     }
 
-    void transitionSwapchainImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags2 srcAccessMask, VkAccessFlags2 dstAccessMask, VkPipelineStageFlags2 srcStageMask, VkPipelineStageFlags2 dstStageMask)
+    void transitionSwapchainImageLayout(uint32_t imageIndex, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags2 srcAccessMask, VkAccessFlags2 dstAccessMask, VkPipelineStageFlags2 srcStageMask, VkPipelineStageFlags2 dstStageMask)
     {
         VkImageMemoryBarrier2 barrier = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
@@ -418,18 +436,18 @@ public:
             .imageMemoryBarrierCount = 1,
             .pImageMemoryBarriers = &barrier,
         };
-        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+        vkCmdPipelineBarrier2(commandBuffers[currentFrame], &dependencyInfo);
     }
 
-    void recordCommandBuffer()
+    void recordCommandBuffer(uint32_t imageIndex)
     {
         VkCommandBufferBeginInfo beginInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         };
 
-        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        vkBeginCommandBuffer(commandBuffers[currentFrame], &beginInfo);
 
-        transitionSwapchainImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+        transitionSwapchainImageLayout(imageIndex, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
 
         VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
         VkRenderingAttachmentInfo attachmentInfo = {
@@ -454,19 +472,19 @@ public:
             .pColorAttachments = &attachmentInfo,
         };
 
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+        vkCmdBeginRendering(commandBuffers[currentFrame], &renderingInfo);
 
-        vkCmdBeginRendering(commandBuffer, &renderingInfo);
+        vkCmdBindPipeline(commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
 
-        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+        vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
 
-        vkCmdEndRendering(commandBuffer);
+        vkCmdEndRendering(commandBuffers[currentFrame]);
 
-        transitionSwapchainImageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+        transitionSwapchainImageLayout(imageIndex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
 
-        vkEndCommandBuffer(commandBuffer);
+        vkEndCommandBuffer(commandBuffers[currentFrame]);
     }
 
     void initializeVulkanResources()
@@ -505,15 +523,15 @@ public:
             }
         }
 
-        uint32_t minImageCount = surfaceCapabilities.minImageCount + 1;
+        uint32_t numSwapchainImages = surfaceCapabilities.minImageCount + 1;
 
-        if (minImageCount > surfaceCapabilities.maxImageCount)
-            minImageCount = surfaceCapabilities.maxImageCount;
+        if (numSwapchainImages > surfaceCapabilities.maxImageCount)
+            numSwapchainImages = surfaceCapabilities.maxImageCount;
 
         VkSwapchainCreateInfoKHR swapchainInfo = {
             .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
             .surface = surface,
-            .minImageCount = minImageCount,
+            .minImageCount = numSwapchainImages,
             .imageFormat = swapchainSurfaceFormat.format,
             .imageColorSpace = swapchainSurfaceFormat.colorSpace,
             .imageExtent = extent,
@@ -710,27 +728,41 @@ public:
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = commandPool,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
+            .commandBufferCount = numSwapchainImages,
         };
 
-        if (vkAllocateCommandBuffers(device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
-            printf("Failed to allocate command buffer\n");
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
 
-        // Sync object creation.
+        if (vkAllocateCommandBuffers(device, &commandBufferAllocInfo, commandBuffers.data()) != VK_SUCCESS)
+            printf("Failed to allocate command buffers\n");
+
+        // Create sync objects.
 
         VkSemaphoreCreateInfo semaphoreInfo = {
             .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         };
-
-        vkCreateSemaphore(device, &semaphoreInfo, NULL, &presentCompleteSemaphore);
-        vkCreateSemaphore(device, &semaphoreInfo, NULL, &renderFinishedSemaphore);
 
         VkFenceCreateInfo fenceInfo = {
             .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = VK_FENCE_CREATE_SIGNALED_BIT,
         };
 
-        vkCreateFence(device, &fenceInfo, NULL, &drawFence);
+        presentCompleteSemaphores.resize(numSwapchainImages);
+        renderFinishedSemaphores.resize(numSwapchainImages);
+        inflightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (uint32_t i = 0; i < numSwapchainImages; i++)
+        {
+            VkResult res1 = vkCreateSemaphore(device, &semaphoreInfo, NULL, &presentCompleteSemaphores[i]);
+            VkResult res2 = vkCreateSemaphore(device, &semaphoreInfo, NULL, &renderFinishedSemaphores[i]);
+
+            if ((res1 & res2) != VK_SUCCESS)
+                printf("Semaphore creation failed\n");
+        }
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+            if (vkCreateFence(device, &fenceInfo, NULL, &inflightFences[i]) != VK_SUCCESS)
+                printf("Fence creation failed\n");
     }
 
 private:
@@ -750,18 +782,18 @@ private:
     VkSwapchainKHR swapchain = NULL;
     std::vector<VkImage> swapchainImages = {};
     std::vector<VkImageView> swapchainImageViews = {};
-    uint32_t imageIndex = 0;
 
     VkShaderModule shaderModule = NULL;
     VkPipelineLayout pipelineLayout = NULL;
     VkPipeline pipeline = NULL;
 
     VkCommandPool commandPool = NULL;
-    VkCommandBuffer commandBuffer = NULL;
-
-    VkSemaphore presentCompleteSemaphore = NULL;
-    VkSemaphore renderFinishedSemaphore = NULL;
-    VkFence drawFence = NULL;
+    std::vector<VkCommandBuffer> commandBuffers = {};
+    std::vector<VkSemaphore> presentCompleteSemaphores = {};
+    std::vector<VkSemaphore> renderFinishedSemaphores = {};
+    std::vector<VkFence> inflightFences = {};
+    uint32_t currentFrame = 0;
+    uint32_t semaphoreIndex = 0;
 
     VkViewport viewport = {};
     VkExtent2D extent = {};
@@ -840,13 +872,12 @@ public:
         return result;
     }
 
-private:
     LRESULT handleMessage(UINT uMsg, WPARAM wParam, LPARAM lParam)
     {
         switch (uMsg)
         {
         case WM_CREATE:
-            renderer.initialize();
+            rendererThread = CreateThread(NULL, NULL, createRendererThread, this, NULL, NULL);
             break;
         case WM_DESTROY:
             PostQuitMessage(0);
@@ -858,8 +889,18 @@ private:
 
     HWND m_hWnd = NULL;
 
-    Renderer renderer = Renderer(this);
+    HANDLE rendererThread = NULL;
+    std::unique_ptr<Renderer> renderer = nullptr;
 };
+
+DWORD createRendererThread(LPVOID lpParameter)
+{
+    std::unique_ptr<Renderer> renderer = std::make_unique<Renderer>((WindowInterface *)lpParameter);
+
+    ((Window *)lpParameter)->renderer = std::move(renderer);
+
+    return 0;
+}
 
 int main(int argc, char *argv[])
 {
