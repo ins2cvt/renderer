@@ -17,10 +17,11 @@ const std::array<const char *, 3> requiredInstanceExtensions = {
     VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
 };
 
-const std::array<const char *, 3> requiredDeviceExtensions = {
+const std::array<const char *, 4> requiredDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     VK_KHR_SPIRV_1_4_EXTENSION_NAME,
     VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+    VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
 };
 
 struct Dimensions
@@ -106,6 +107,14 @@ public:
 
         if (device != NULL)
         {
+            if (drawFence != NULL)
+                vkDestroyFence(device, drawFence, NULL);
+            if (presentCompleteSemaphore != NULL)
+                vkDestroySemaphore(device, presentCompleteSemaphore, NULL);
+            if (renderFinishedSemaphore != NULL)
+                vkDestroySemaphore(device, renderFinishedSemaphore, NULL);
+            if (commandPool != NULL)
+                vkDestroyCommandPool(device, commandPool, NULL);
             if (shaderModule != NULL)
                 vkDestroyShaderModule(device, shaderModule, NULL);
             if (pipeline != NULL)
@@ -135,6 +144,58 @@ public:
     {
         initializeVulkan();
         initializeVulkanResources();
+        mainLoop();
+    }
+
+    void mainLoop()
+    {
+        for (;;)
+        {
+            drawFrame();
+            break;
+        }
+
+        vkDeviceWaitIdle(device);
+    }
+
+    void drawFrame()
+    {
+        vkQueueWaitIdle(queue);
+
+        vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, presentCompleteSemaphore, VK_NULL_HANDLE, &imageIndex);
+        recordCommandBuffer();
+
+        vkResetFences(device, 1, &drawFence);
+
+        VkPipelineStageFlags waitDestinationStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+
+        VkSubmitInfo submitInfo = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &presentCompleteSemaphore,
+            .pWaitDstStageMask = &waitDestinationStageMask,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &commandBuffer,
+            .signalSemaphoreCount = 1,
+            .pSignalSemaphores = &renderFinishedSemaphore,
+        };
+
+        vkQueueSubmit(queue, 1, &submitInfo, drawFence);
+
+        while (vkWaitForFences(device, 1, &drawFence, VK_TRUE, UINT32_MAX))
+            ;
+
+        VkPresentInfoKHR presentInfo = {
+            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .waitSemaphoreCount = 1,
+            .pWaitSemaphores = &renderFinishedSemaphore,
+            .swapchainCount = 1,
+            .pSwapchains = &swapchain,
+            .pImageIndices = &imageIndex,
+        };
+
+        if (vkQueuePresentKHR(queue, &presentInfo) != VK_SUCCESS)
+            printf("Presentation failed\n");
     }
 
     void initializeVulkan()
@@ -232,7 +293,7 @@ public:
             std::vector<VkQueueFamilyProperties2> queueFamilyProperties(queueFamilyPropertyCount, emptyQueueFamilyProperties);
             vkGetPhysicalDeviceQueueFamilyProperties2(physicalDeviceCandidate, &queueFamilyPropertyCount, queueFamilyProperties.data());
 
-            familyIndex = UINT32_MAX;
+            queueFamilyIndex = UINT32_MAX;
 
             for (uint32_t i = 0; i < queueFamilyPropertyCount; i++)
             {
@@ -243,7 +304,7 @@ public:
                     if (vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDeviceCandidate, i) == VK_FALSE)
                         continue;
 
-                    familyIndex = i;
+                    queueFamilyIndex = i;
                     break;
                 }
             }
@@ -259,14 +320,14 @@ public:
 
             // Logical device and queues
 
-            if ((familyIndex != UINT32_MAX) && supportsVulkan1_4)
+            if ((queueFamilyIndex != UINT32_MAX) && supportsVulkan1_4)
             {
                 physicalDevice = physicalDeviceCandidate;
 
                 float queuePriorities = 0.0f;
                 VkDeviceQueueCreateInfo deviceQueueInfo = {
                     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                    .queueFamilyIndex = familyIndex,
+                    .queueFamilyIndex = queueFamilyIndex,
                     .queueCount = 1,
                     .pQueuePriorities = &queuePriorities,
                 };
@@ -285,6 +346,7 @@ public:
                 VkPhysicalDeviceVulkan13Features deviceFeatures13 = {
                     .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
                     .pNext = &deviceFeatures11,
+                    .synchronization2 = VK_TRUE,
                     .dynamicRendering = VK_TRUE,
                 };
 
@@ -312,7 +374,7 @@ public:
                 if (supportsVulkan1_4 == false)
                     printf("%s does not support Vulkan 1.4\n", physicalDeviceProperties.properties.deviceName);
 
-                if (familyIndex == UINT32_MAX)
+                if (queueFamilyIndex == UINT32_MAX)
                     printf("%s does not expose a queue with both graphics and present support\n", physicalDeviceProperties.properties.deviceName);
             }
         }
@@ -321,18 +383,98 @@ public:
             printf("Failed to create surface\n");
 
         VkBool32 isSurfaceSupportedByPhysicalDevice = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, familyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
+        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, queueFamilyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
+
+        vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
 
         if (isSurfaceSupportedByPhysicalDevice == VK_FALSE)
             printf("Surface is not supported by physical device\n");
     }
 
+    void transitionSwapchainImageLayout(VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags2 srcAccessMask, VkAccessFlags2 dstAccessMask, VkPipelineStageFlags2 srcStageMask, VkPipelineStageFlags2 dstStageMask)
+    {
+        VkImageMemoryBarrier2 barrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask = srcStageMask,
+            .srcAccessMask = srcAccessMask,
+            .dstStageMask = dstStageMask,
+            .dstAccessMask = dstAccessMask,
+            .oldLayout = oldLayout,
+            .newLayout = newLayout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = swapchainImages[imageIndex],
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        VkDependencyInfo dependencyInfo = {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &barrier,
+        };
+        vkCmdPipelineBarrier2(commandBuffer, &dependencyInfo);
+    }
+
+    void recordCommandBuffer()
+    {
+        VkCommandBufferBeginInfo beginInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+
+        vkBeginCommandBuffer(commandBuffer, &beginInfo);
+
+        transitionSwapchainImageLayout(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+        VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
+        VkRenderingAttachmentInfo attachmentInfo = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = swapchainImageViews[imageIndex],
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = clearColor,
+        };
+
+        VkRect2D scissor = {
+            .offset = {0, 0},
+            .extent = extent,
+        };
+
+        VkRenderingInfo renderingInfo = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .renderArea = scissor,
+            .layerCount = 1,
+            .colorAttachmentCount = 1,
+            .pColorAttachments = &attachmentInfo,
+        };
+
+        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+        vkCmdBeginRendering(commandBuffer, &renderingInfo);
+
+        vkCmdDraw(commandBuffer, 6, 1, 0, 0);
+
+        vkCmdEndRendering(commandBuffer);
+
+        transitionSwapchainImageLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+
+        vkEndCommandBuffer(commandBuffer);
+    }
+
     void initializeVulkanResources()
     {
+        // Swapchain creation.
+
         VkSurfaceCapabilitiesKHR surfaceCapabilities = {};
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCapabilities);
-
-        VkExtent2D extent = {};
 
         if (surfaceCapabilities.currentExtent.width != UINT32_MAX)
         {
@@ -379,7 +521,7 @@ public:
             .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 1,
-            .pQueueFamilyIndices = &familyIndex,
+            .pQueueFamilyIndices = &queueFamilyIndex,
             .preTransform = surfaceCapabilities.currentTransform,
             .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             .presentMode = VK_PRESENT_MODE_FIFO_KHR,
@@ -414,6 +556,8 @@ public:
             viewInfo.image = swapchainImages[i];
             vkCreateImageView(device, &viewInfo, NULL, &swapchainImageViews[i]);
         }
+
+        // Graphics pipeline creation.
 
         FILE *shaderFile = fopen("shader.spv", "rb");
         fseek(shaderFile, 0, SEEK_END);
@@ -463,7 +607,7 @@ public:
             .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         };
 
-        VkViewport viewport = {
+        viewport = {
             .x = 0.0f,
             .y = 0.0f,
             .width = (float)extent.width,
@@ -521,7 +665,7 @@ public:
 
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL, &pipelineLayout);
 
-        VkPipelineRenderingCreateInfo renderingInfo = {
+        VkPipelineRenderingCreateInfo pipelineRenderingInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .colorAttachmentCount = 1,
             .pColorAttachmentFormats = &swapchainSurfaceFormat.format,
@@ -534,7 +678,7 @@ public:
 
         VkGraphicsPipelineCreateInfo graphicsPipelineInfo = {
             .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-            .pNext = &renderingInfo,
+            .pNext = &pipelineRenderingInfo,
             .stageCount = 2,
             .pStages = shaderStages,
             .pVertexInputState = &vertexInputStateInfo,
@@ -550,6 +694,43 @@ public:
 
         if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &graphicsPipelineInfo, NULL, &pipeline) != VK_SUCCESS)
             printf("Graphics pipeline creation failed\n");
+
+        // Command pool and command buffer creation.
+
+        VkCommandPoolCreateInfo commandPoolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = queueFamilyIndex,
+        };
+
+        if (vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool) != VK_SUCCESS)
+            printf("Command pool creation failed\n");
+
+        VkCommandBufferAllocateInfo commandBufferAllocInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = commandPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+
+        if (vkAllocateCommandBuffers(device, &commandBufferAllocInfo, &commandBuffer) != VK_SUCCESS)
+            printf("Failed to allocate command buffer\n");
+
+        // Sync object creation.
+
+        VkSemaphoreCreateInfo semaphoreInfo = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        };
+
+        vkCreateSemaphore(device, &semaphoreInfo, NULL, &presentCompleteSemaphore);
+        vkCreateSemaphore(device, &semaphoreInfo, NULL, &renderFinishedSemaphore);
+
+        VkFenceCreateInfo fenceInfo = {
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+
+        vkCreateFence(device, &fenceInfo, NULL, &drawFence);
     }
 
 private:
@@ -563,15 +744,27 @@ private:
     VkPhysicalDevice physicalDevice = NULL;
     VkDevice device = NULL;
     // Graphics and present queue family index.
-    uint32_t familyIndex = UINT32_MAX;
+    uint32_t queueFamilyIndex = UINT32_MAX;
+    VkQueue queue = NULL;
 
     VkSwapchainKHR swapchain = NULL;
     std::vector<VkImage> swapchainImages = {};
     std::vector<VkImageView> swapchainImageViews = {};
+    uint32_t imageIndex = 0;
 
     VkShaderModule shaderModule = NULL;
     VkPipelineLayout pipelineLayout = NULL;
     VkPipeline pipeline = NULL;
+
+    VkCommandPool commandPool = NULL;
+    VkCommandBuffer commandBuffer = NULL;
+
+    VkSemaphore presentCompleteSemaphore = NULL;
+    VkSemaphore renderFinishedSemaphore = NULL;
+    VkFence drawFence = NULL;
+
+    VkViewport viewport = {};
+    VkExtent2D extent = {};
 };
 
 class Window : WindowInterface
