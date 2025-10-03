@@ -77,13 +77,22 @@ struct Vertex
     }
 };
 
-const std::array<Vertex, 6> square = {{
+const std::array<Vertex, 6> trapezoid = {{
     {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
     {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.4f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
     {{0.4f, 0.5f}, {1.0f, 1.0f, 1.0f}},
     {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+}};
+
+const std::array<Vertex, 6> diamond = {{
+    {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
+    {{-0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.4f, -1.0f}, {1.0f, 0.5f, 0.0f}},
+    {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
+    {{0.4f, 0.0f}, {1.0f, 1.0f, 1.0f}},
+    {{-0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
 }};
 
 // TODO: Replace with a proper interface after factoring classes out.
@@ -158,6 +167,8 @@ public:
         return VK_TRUE;
     }
 
+    // MARK: Renderer ctor/dtor
+
     // TODO: Replace with proper interface after factoring relevant class out.
     Renderer(WindowInterface *windowInterface) : windowInterface(windowInterface)
     {
@@ -185,8 +196,12 @@ public:
                     vkDestroySemaphore(device, semaphore, NULL);
             if (commandBuffers.size() > 0)
                 vkFreeCommandBuffers(device, commandPool, MAX_FRAMES_IN_FLIGHT, commandBuffers.data());
+            if (transferCommandBuffer != NULL)
+                vkFreeCommandBuffers(device, commandPool, 1, &transferCommandBuffer);
             if (commandPool != NULL)
                 vkDestroyCommandPool(device, commandPool, NULL);
+            if (transferCommandPool != NULL)
+                vkDestroyCommandPool(device, transferCommandPool, NULL);
             if (pipeline != NULL)
                 vkDestroyPipeline(device, pipeline, NULL);
             if (pipelineLayout != NULL)
@@ -268,7 +283,7 @@ public:
             .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
             .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
             .queueFamilyIndexCount = 1,
-            .pQueueFamilyIndices = &queueFamilyIndex,
+            .pQueueFamilyIndices = &graphicsQueueFamilyIndex,
             .preTransform = surfaceCapabilities.currentTransform,
             .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
             .presentMode = VK_PRESENT_MODE_FIFO_KHR,
@@ -346,7 +361,7 @@ public:
             .pSignalSemaphores = &renderFinishedSemaphores[imageIndex],
         };
 
-        vkQueueSubmit(queue, 1, &submitInfo, inflightFences[currentFrame]);
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, inflightFences[currentFrame]);
 
         VkPresentInfoKHR presentInfo = {
             .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -357,7 +372,7 @@ public:
             .pImageIndices = &imageIndex,
         };
 
-        VkResult result = vkQueuePresentKHR(queue, &presentInfo);
+        VkResult result = vkQueuePresentKHR(graphicsQueue, &presentInfo);
 
         if (result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR)
         {
@@ -449,13 +464,20 @@ public:
 
         vkCmdBindPipeline(commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        VkDeviceSize bufferOffsets[1] = {0};
-        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &vertexBuffer, bufferOffsets);
+        std::array<VkBuffer, 2> buffers = {
+            vertexBuffer,
+            transferBuffer,
+        };
+        std::array<VkDeviceSize, 2> offsets = {
+            0,
+            0,
+        };
+        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 2, buffers.data(), offsets.data());
 
         vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
         vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
 
-        vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
+        vkCmdDraw(commandBuffers[currentFrame], 12, 1, 0, 0);
 
         vkCmdEndRendering(commandBuffers[currentFrame]);
 
@@ -466,6 +488,109 @@ public:
 
     // MARK: Renderer: Init Vk res
 
+    // TODO: Rework this so it's only used when necessary (i.e. when there's no graphics queue family with transfer)
+    void transferData()
+    {
+        std::array<uint32_t, 2> queueFamilyIndices = {
+            transferQueueFamilyIndex,
+            graphicsQueueFamilyIndex,
+        };
+
+        VkBufferCreateInfo stagingBufferInfo = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = sizeof(diamond[0]) * diamond.size(),
+            .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            .sharingMode = VK_SHARING_MODE_CONCURRENT,
+            .queueFamilyIndexCount = (uint32_t)queueFamilyIndices.size(),
+            .pQueueFamilyIndices = queueFamilyIndices.data(),
+        };
+
+        VkBuffer stagingBuffer = NULL;
+
+        vkCreateBuffer(device, &stagingBufferInfo, NULL, &stagingBuffer);
+
+        VkMemoryRequirements stagingMemoryRequirements = {};
+
+        vkGetBufferMemoryRequirements(device, stagingBuffer, &stagingMemoryRequirements);
+
+        VkMemoryAllocateInfo stagingMemoryAllocateInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = stagingMemoryRequirements.size,
+            .memoryTypeIndex = getBufferMemoryTypeBitOrder(stagingMemoryRequirements, (VkMemoryPropertyFlagBits)(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)),
+        };
+
+        VkDeviceMemory stagingMemory = NULL;
+
+        vkAllocateMemory(device, &stagingMemoryAllocateInfo, NULL, &stagingMemory);
+        vkBindBufferMemory(device, stagingBuffer, stagingMemory, 0);
+
+        void *data = nullptr;
+
+        vkMapMemory(device, stagingMemory, 0, stagingBufferInfo.size, NULL, &data);
+        memcpy(data, diamond.data(), stagingBufferInfo.size);
+        vkUnmapMemory(device, stagingMemory);
+
+        VkBufferCreateInfo destinationBufferInfo = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = sizeof(diamond[0]) * diamond.size(),
+            .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        vkCreateBuffer(device, &destinationBufferInfo, NULL, &transferBuffer);
+        VkMemoryRequirements destinationMemoryRequirements = {};
+        vkGetBufferMemoryRequirements(device, transferBuffer, &destinationMemoryRequirements);
+        VkMemoryAllocateInfo destinationMemoryAllocateInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = destinationMemoryRequirements.size,
+            .memoryTypeIndex = getBufferMemoryTypeBitOrder(destinationMemoryRequirements, (VkMemoryPropertyFlagBits)VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        };
+        vkAllocateMemory(device, &destinationMemoryAllocateInfo, NULL, &transferBufferMemory);
+        vkBindBufferMemory(device, transferBuffer, transferBufferMemory, 0);
+
+        VkCommandBufferBeginInfo transferBeginInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+
+        vkResetCommandBuffer(transferCommandBuffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+        vkBeginCommandBuffer(transferCommandBuffer, &transferBeginInfo);
+
+        VkBufferCopy bufferCopyRegion = {
+            .srcOffset = 0,
+            .dstOffset = 0,
+            .size = destinationBufferInfo.size,
+        };
+
+        vkCmdCopyBuffer(transferCommandBuffer, stagingBuffer, transferBuffer, 1, &bufferCopyRegion);
+
+        vkEndCommandBuffer(transferCommandBuffer);
+        
+        VkSubmitInfo submitInfo = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &transferCommandBuffer,
+        };
+        
+        vkQueueSubmit(transferQueue, 1, &submitInfo, NULL);
+        
+        vkQueueWaitIdle(transferQueue);
+    }
+
+    uint32_t getBufferMemoryTypeBitOrder(VkMemoryRequirements requirements, VkMemoryPropertyFlagBits requestedProperties)
+    {
+        const auto &properties = physicalDeviceMemoryProperties.memoryProperties;
+
+        for (uint32_t i = 0; i < properties.memoryTypeCount; i++)
+        {
+            if ((requirements.memoryTypeBits & (1 << i)) &&
+                (properties.memoryTypes[i].propertyFlags & requestedProperties))
+            {
+                return i;
+            }
+        }
+
+        return UINT32_MAX;
+    }
+
     void initializeVulkanResources()
     {
         createSwapchain();
@@ -474,7 +599,7 @@ public:
 
         VkBufferCreateInfo vertexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(square[0]) * square.size(),
+            .size = sizeof(trapezoid[0]) * trapezoid.size(),
             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -487,23 +612,11 @@ public:
         VkPhysicalDeviceMemoryProperties2 vertexMemoryProperties = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
         };
-        vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &vertexMemoryProperties);
-
-        uint32_t memoryTypeBitOrder = UINT32_MAX;
-        for (uint32_t i = 0; i < vertexMemoryProperties.memoryProperties.memoryTypeCount; i++)
-        {
-            if ((vertexMemoryRequirements.memoryTypeBits & (1 << i)) &
-                (vertexMemoryProperties.memoryProperties.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)))
-            {
-                memoryTypeBitOrder = i;
-                break;
-            }
-        }
 
         VkMemoryAllocateInfo memoryAllocateInfo = {
             .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
             .allocationSize = vertexMemoryRequirements.size,
-            .memoryTypeIndex = memoryTypeBitOrder,
+            .memoryTypeIndex = getBufferMemoryTypeBitOrder(vertexMemoryRequirements, (VkMemoryPropertyFlagBits)(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)),
         };
 
         vkAllocateMemory(device, &memoryAllocateInfo, NULL, &vertexBufferMemory);
@@ -513,7 +626,7 @@ public:
         void *data = nullptr;
         vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &data);
 
-        memcpy(data, square.data(), vertexBufferInfo.size);
+        memcpy(data, trapezoid.data(), vertexBufferInfo.size);
 
         vkUnmapMemory(device, vertexBufferMemory);
 
@@ -654,11 +767,20 @@ public:
         VkCommandPoolCreateInfo commandPoolInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
             .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-            .queueFamilyIndex = queueFamilyIndex,
+            .queueFamilyIndex = graphicsQueueFamilyIndex,
         };
 
         if (vkCreateCommandPool(device, &commandPoolInfo, NULL, &commandPool) != VK_SUCCESS)
             printf("Command pool creation failed\n");
+
+        VkCommandPoolCreateInfo transferCommandPoolInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            .queueFamilyIndex = transferQueueFamilyIndex,
+        };
+
+        if (vkCreateCommandPool(device, &transferCommandPoolInfo, NULL, &transferCommandPool) != VK_SUCCESS)
+            printf("Transfer command pool creation failed\n");
 
         VkCommandBufferAllocateInfo commandBufferAllocInfo = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -671,6 +793,16 @@ public:
 
         if (vkAllocateCommandBuffers(device, &commandBufferAllocInfo, commandBuffers.data()) != VK_SUCCESS)
             printf("Failed to allocate command buffers\n");
+
+        VkCommandBufferAllocateInfo transferCommandBufferAllocInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = transferCommandPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+
+        if (vkAllocateCommandBuffers(device, &transferCommandBufferAllocInfo, &transferCommandBuffer) != VK_SUCCESS)
+            printf("Failed to allocate transfer command buffer\n");
 
         // Create sync objects.
 
@@ -699,6 +831,8 @@ public:
         for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
             if (vkCreateFence(device, &fenceInfo, NULL, &inflightFences[i]) != VK_SUCCESS)
                 printf("Fence creation failed\n");
+
+        transferData();
     }
 
     // MARK: Renderer: Init Vk
@@ -798,19 +932,25 @@ public:
             std::vector<VkQueueFamilyProperties2> queueFamilyProperties(queueFamilyPropertyCount, emptyQueueFamilyProperties);
             vkGetPhysicalDeviceQueueFamilyProperties2(physicalDeviceCandidate, &queueFamilyPropertyCount, queueFamilyProperties.data());
 
-            queueFamilyIndex = UINT32_MAX;
+            graphicsQueueFamilyIndex = UINT32_MAX;
 
             for (uint32_t i = 0; i < queueFamilyPropertyCount; i++)
             {
                 const auto &queueFamilyProperty = queueFamilyProperties[i].queueFamilyProperties;
 
-                if (queueFamilyProperty.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+                if (queueFamilyProperty.queueFlags & VK_QUEUE_GRAPHICS_BIT && graphicsQueueFamilyIndex == UINT32_MAX)
                 {
                     if (vkGetPhysicalDeviceWin32PresentationSupportKHR(physicalDeviceCandidate, i) == VK_FALSE)
                         continue;
 
-                    queueFamilyIndex = i;
-                    break;
+                    graphicsQueueFamilyIndex = i;
+                }
+
+                if ((queueFamilyProperty.queueFlags & VK_QUEUE_TRANSFER_BIT) &&
+                    ((queueFamilyProperty.queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) &&
+                    (transferQueueFamilyIndex == UINT32_MAX))
+                {
+                    transferQueueFamilyIndex = i;
                 }
             }
 
@@ -825,16 +965,30 @@ public:
 
             // Logical device and queues
 
-            if ((queueFamilyIndex != UINT32_MAX) && supportsVulkan1_4)
+            if ((graphicsQueueFamilyIndex != UINT32_MAX) && supportsVulkan1_4)
             {
                 physicalDevice = physicalDeviceCandidate;
 
+                vkGetPhysicalDeviceMemoryProperties2(physicalDevice, &physicalDeviceMemoryProperties);
+
                 float queuePriorities = 0.0f;
-                VkDeviceQueueCreateInfo deviceQueueInfo = {
+                VkDeviceQueueCreateInfo graphicsQueueInfo = {
                     .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-                    .queueFamilyIndex = queueFamilyIndex,
+                    .queueFamilyIndex = graphicsQueueFamilyIndex,
                     .queueCount = 1,
                     .pQueuePriorities = &queuePriorities,
+                };
+
+                VkDeviceQueueCreateInfo transferQueueInfo = {
+                    .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                    .queueFamilyIndex = transferQueueFamilyIndex,
+                    .queueCount = 1,
+                    .pQueuePriorities = &queuePriorities,
+                };
+
+                std::array<VkDeviceQueueCreateInfo, 2> deviceQueueInfos = {
+                    graphicsQueueInfo,
+                    transferQueueInfo,
                 };
 
                 VkPhysicalDeviceExtendedDynamicStateFeaturesEXT dynamicFeatures = {
@@ -863,8 +1017,8 @@ public:
                 VkDeviceCreateInfo deviceInfo = {
                     .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                     .pNext = &features,
-                    .queueCreateInfoCount = 1,
-                    .pQueueCreateInfos = &deviceQueueInfo,
+                    .queueCreateInfoCount = (uint32_t)deviceQueueInfos.size(),
+                    .pQueueCreateInfos = deviceQueueInfos.data(),
                     .enabledExtensionCount = (uint32_t)requiredDeviceExtensions.size(),
                     .ppEnabledExtensionNames = requiredDeviceExtensions.data(),
                 };
@@ -879,7 +1033,7 @@ public:
                 if (supportsVulkan1_4 == false)
                     printf("%s does not support Vulkan 1.4\n", physicalDeviceProperties.properties.deviceName);
 
-                if (queueFamilyIndex == UINT32_MAX)
+                if (graphicsQueueFamilyIndex == UINT32_MAX)
                     printf("%s does not expose a queue with both graphics and present support\n", physicalDeviceProperties.properties.deviceName);
             }
         }
@@ -888,9 +1042,12 @@ public:
             printf("Failed to create surface\n");
 
         VkBool32 isSurfaceSupportedByPhysicalDevice = VK_FALSE;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, queueFamilyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
+        vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, graphicsQueueFamilyIndex, surface, &isSurfaceSupportedByPhysicalDevice);
 
-        vkGetDeviceQueue(device, queueFamilyIndex, 0, &queue);
+        vkGetDeviceQueue(device, graphicsQueueFamilyIndex, 0, &graphicsQueue);
+
+        if (transferQueueFamilyIndex != UINT32_MAX)
+            vkGetDeviceQueue(device, transferQueueFamilyIndex, 0, &transferQueue);
 
         if (isSurfaceSupportedByPhysicalDevice == VK_FALSE)
             printf("Surface is not supported by physical device\n");
@@ -908,9 +1065,11 @@ private:
 
     VkPhysicalDevice physicalDevice = NULL;
     VkDevice device = NULL;
-    // Graphics and present queue family index.
-    uint32_t queueFamilyIndex = UINT32_MAX;
-    VkQueue queue = NULL;
+    VkPhysicalDeviceMemoryProperties2 physicalDeviceMemoryProperties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2};
+    uint32_t graphicsQueueFamilyIndex = UINT32_MAX;
+    VkQueue graphicsQueue = NULL;
+    uint32_t transferQueueFamilyIndex = UINT32_MAX;
+    VkQueue transferQueue = NULL;
 
     VkSwapchainKHR swapchain = NULL;
     uint32_t numSwapchainImages = 0;
@@ -933,8 +1092,13 @@ private:
     uint32_t currentFrame = 0;
     uint32_t semaphoreIndex = 0;
 
+    VkCommandPool transferCommandPool = NULL;
+    VkCommandBuffer transferCommandBuffer = NULL;
+
     VkDeviceMemory vertexBufferMemory = NULL;
     VkBuffer vertexBuffer = NULL;
+    VkDeviceMemory transferBufferMemory = NULL;
+    VkBuffer transferBuffer = NULL;
 };
 
 // MARK: Window class
