@@ -1,20 +1,8 @@
-static float2 squarePositions[6] = float2[](
-    float2(0.5, -0.5),
-    float2(-0.5, 0.5),
-    float2(-0.5, -0.5),
-    float2(0.5, -0.5),
-    float2(0.5, 0.5),
-    float2(-0.5, 0.5),
-);
-
-static float3 squareColors[6] = float3[](
-    float3(0.0f, 0.0f, 1.0f),
-    float3(0.0f, 1.0f, 0.0f),
-    float3(1.0f, 0.0f, 0.0f),
-    float3(0.0f, 0.0f, 1.0f),
-    float3(1.0f, 1.0f, 1.0f),
-    float3(0.0f, 1.0f, 0.0f),
-);
+struct VertexInput
+{
+    float2 position;
+    float3 color;
+};
 
 struct VertexOutput {
     float4 position : SV_Position;
@@ -22,10 +10,10 @@ struct VertexOutput {
 };
 
 [shader("vertex")]
-VertexOutput vertexShader(uint vertexId: SV_VertexID) {
+VertexOutput vertexShader(VertexInput input) {
     VertexOutput output;
-    output.position = float4(squarePositions[vertexId], 0.0, 1.0);
-    output.color = squareColors[vertexId];
+    output.position = float4(input.position, 0.0, 1.0);
+    output.color = input.color;
     return output;
 };
 
