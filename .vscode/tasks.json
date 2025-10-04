@@ -16,7 +16,7 @@
 		{
 			"type": "shell",
 			"label": "Compile shader",
-			"command": "pwsh ./compile-shader.ps1 ./src/shader.slang ${command:cmake.launchTargetDirectory}/shader.spv"
+			"command": "pwsh ./prepare-resources.ps1 ./ ${command:cmake.launchTargetDirectory}"
 		}
 	]
 }
