@@ -5,11 +5,13 @@
 #include <vulkan/vulkan.h>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 #include <iostream>
 #include <array>
 #include <vector>
 #include <memory>
+#include <chrono>
 
 const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
@@ -36,9 +38,16 @@ struct Dimensions
     uint32_t height = 0;
 };
 
+struct UniformBufferObject
+{
+    glm::mat4 model;
+    glm::mat4 view;
+    glm::mat4 proj;
+};
+
 struct Vertex
 {
-    glm::vec2 position;
+    glm::vec2 pos;
     glm::vec3 color;
 
     static VkVertexInputBindingDescription getBindingDescription()
@@ -58,7 +67,7 @@ struct Vertex
             .location = 0,
             .binding = 0,
             .format = VK_FORMAT_R32G32_SFLOAT,
-            .offset = offsetof(Vertex, position),
+            .offset = offsetof(Vertex, pos),
         };
 
         VkVertexInputAttributeDescription colorsDescription = {
@@ -78,8 +87,8 @@ struct Vertex
 };
 
 const std::array<Vertex, 6> middleTrapezoid = {{
-    {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, -0.5f}, {1.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 0.0f}},
     {{-0.4f, -0.5f}, {1.0f, 0.0f, 0.0f}},
     {{0.4f, 0.5f}, {1.0f, 1.0f, 1.0f}},
 }};
@@ -341,6 +350,24 @@ public:
         createSwapchain();
     }
 
+    // TODO: Use a push constant for this.
+    void updateUniformBuffer(uint32_t frameIndex)
+    {
+        static auto start = std::chrono::high_resolution_clock::now();
+
+        auto now = std::chrono::high_resolution_clock::now();
+        float elapsed = std::chrono::duration<float, std::chrono::seconds::period>(now - start).count();
+
+        UniformBufferObject ubo = {};
+
+        // TODO: Use the right GLM define so that angles can be input in degrees.
+        ubo.model = glm::rotate(glm::mat4(1.0f), elapsed * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.proj = glm::perspective(glm::radians(45.0f), (float)extent.width / extent.height, 0.1f, 10.0f);
+
+        memcpy(uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
+    }
+
     void drawFrame()
     {
         while (vkWaitForFences(device, 1, &inflightFences[currentFrame], VK_TRUE, UINT64_MAX) == VK_TIMEOUT)
@@ -349,6 +376,9 @@ public:
         uint32_t imageIndex = 0;
 
         vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, presentCompleteSemaphores[semaphoreIndex], VK_NULL_HANDLE, &imageIndex);
+
+        updateUniformBuffer(currentFrame);
+
         vkResetFences(device, 1, &inflightFences[currentFrame]);
         vkResetCommandBuffer(commandBuffers[currentFrame], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
         recordCommandBuffer(imageIndex);
@@ -471,6 +501,8 @@ public:
 
         vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
         vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
+
+        vkCmdBindDescriptorSets(commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSets[currentFrame], 0, NULL);
 
         VkDeviceSize offset = 0;
 
@@ -630,6 +662,7 @@ public:
         vkUnmapMemory(device, vertexBufferMemory);
 
         // TODO: Deduplicate code above and below.
+        // TODO: Store everything in one buffer and use offsets.
 
         VkBufferCreateInfo indexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
@@ -688,6 +721,100 @@ public:
             vertexShaderStageInfo,
             fragmentShaderStageInfo,
         };
+
+        VkDescriptorSetLayoutBinding uboLayoutBindingInfo = {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        };
+
+        VkDescriptorSetLayoutCreateInfo descriptorSetLayoutInfo = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = 1,
+            .pBindings = &uboLayoutBindingInfo,
+        };
+
+        uniformBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMemory.resize(MAX_FRAMES_IN_FLIGHT);
+        uniformBuffersMapped.resize(MAX_FRAMES_IN_FLIGHT);
+        descriptorSets.resize(MAX_FRAMES_IN_FLIGHT);
+        descriptorSetLayouts.resize(MAX_FRAMES_IN_FLIGHT);
+
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            VkBufferCreateInfo bufferCreateInfo = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size = sizeof(UniformBufferObject),
+                .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            };
+
+            vkCreateBuffer(device, &bufferCreateInfo, NULL, &uniformBuffers[i]);
+
+            VkMemoryRequirements memoryRequirements = {};
+
+            vkGetBufferMemoryRequirements(device, uniformBuffers[i], &memoryRequirements);
+
+            VkMemoryAllocateInfo memoryAllocateInfo = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .allocationSize = sizeof(UniformBufferObject),
+                .memoryTypeIndex = getBufferMemoryTypeBitOrder(memoryRequirements, (VkMemoryPropertyFlagBits) (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)),
+            };
+
+            vkAllocateMemory(device, &memoryAllocateInfo, NULL, &uniformBuffersMemory[i]);
+
+            vkBindBufferMemory(device, uniformBuffers[i], uniformBuffersMemory[i], 0);
+
+            vkMapMemory(device, uniformBuffersMemory[i], 0, memoryAllocateInfo.allocationSize, NULL, &uniformBuffersMapped[i]);
+
+            vkCreateDescriptorSetLayout(device, &descriptorSetLayoutInfo, NULL, &descriptorSetLayouts[i]);
+        }
+
+
+        VkDescriptorPoolSize descriptorPoolSize = {
+            .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = MAX_FRAMES_IN_FLIGHT,
+        };
+
+        VkDescriptorPoolCreateInfo descriptorPoolInfo = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .maxSets = MAX_FRAMES_IN_FLIGHT,
+            .poolSizeCount = 1,
+            .pPoolSizes = &descriptorPoolSize,
+        };
+
+        vkCreateDescriptorPool(device, &descriptorPoolInfo, NULL, &descriptorPool);
+
+        VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {
+            .sType= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = descriptorPool,
+            .descriptorSetCount = (uint32_t)descriptorSetLayouts.size(),
+            .pSetLayouts = descriptorSetLayouts.data(),
+        };
+
+        vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, descriptorSets.data());
+
+        for (uint32_t i = 0 ; i < MAX_FRAMES_IN_FLIGHT; i++)
+        {
+            VkDescriptorBufferInfo descriptorBufferInfo = {
+                .buffer = uniformBuffers[i],
+                .offset = 0,
+                .range = sizeof(UniformBufferObject),
+            };
+
+            VkWriteDescriptorSet writeDescriptorSet = {
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstSet = descriptorSets[i],
+                .dstBinding = 0,
+                .dstArrayElement = 0,
+                .descriptorCount =1,
+                .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                .pBufferInfo = &descriptorBufferInfo,
+            };
+
+            vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, NULL);
+        }
 
         auto bindingDescription = Vertex::getBindingDescription();
         auto attributeDescriptions = Vertex::getAttributeDescription();
@@ -748,7 +875,8 @@ public:
 
         VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-            .setLayoutCount = 0,
+            .setLayoutCount = (uint32_t)descriptorSetLayouts.size(),
+            .pSetLayouts = descriptorSetLayouts.data(),
             .pushConstantRangeCount = 0,
         };
 
@@ -1123,6 +1251,14 @@ private:
     VkBuffer indexBuffer = NULL;
     VkDeviceMemory transferBufferMemory = NULL;
     VkBuffer transferBuffer = NULL;
+
+    std::vector<VkBuffer> uniformBuffers = {};
+    std::vector<VkDeviceMemory> uniformBuffersMemory = {};
+    std::vector<void*> uniformBuffersMapped = {};
+
+    std::vector<VkDescriptorSetLayout> descriptorSetLayouts = {};
+    VkDescriptorPool descriptorPool = NULL;
+    std::vector<VkDescriptorSet> descriptorSets = {};
 };
 
 // MARK: Window class
