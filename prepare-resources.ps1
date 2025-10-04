@@ -12,4 +12,4 @@ Invoke-Expression "$slangcPath $shaderSourcePath -target spirv -profile spirv_1_
 
 $resourceDirectoryPath = Join-Path -Path $projectPath -ChildPath "res"
 
-Copy-Item -Path $resourceDirectoryPath -Destination $outputPath -Recurse
+Copy-Item -Path $resourceDirectoryPath -Destination $outputPath -Recurse -Force

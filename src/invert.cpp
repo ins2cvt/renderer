@@ -15,6 +15,179 @@
 #include <memory>
 #include <chrono>
 
+// MARK: Obj loader
+
+// TODO: Make the loader work for all possible variations of the data and extract all the data.
+struct Obj
+{
+    float *vertexData = nullptr;
+    unsigned numVertexLines = 0;
+    unsigned *indexData = nullptr;
+    unsigned numIndexLines = 0;
+
+    // TODO: Chunked reads.
+    Obj(const char *filename)
+    {
+        FILE *file = fopen(filename, "rb");
+        fseek(file, 0, SEEK_END);
+        size_t size = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        char *buffer = (char *)malloc(size);
+        fread(buffer, 1, size, file);
+        fclose(file);
+
+        unsigned offset = 0;
+
+        while (offset < size)
+        {
+            if (strncmp("v", buffer + offset, 1) == 0)
+            {
+                numVertexLines++;
+            }
+            else if (strncmp("f", buffer + offset, 1) == 0)
+            {
+                numIndexLines++;
+            }
+
+            // Skip until seeing a newline.
+            while (buffer[offset] != '\n')
+            {
+                offset++;
+            }
+            // Then skip the newline.
+            offset++;
+        }
+
+        vertexData = (float *)malloc(sizeof(float) * numVertexLines * 3);
+        indexData = (unsigned *)malloc(sizeof(unsigned) * numIndexLines * 3);
+
+        offset = 0;
+
+        unsigned vertexDataIndex = 0;
+        unsigned indexDataIndex = 0;
+
+        while (offset < size)
+        {
+            if (strncmp("v", buffer + offset, 1) == 0)
+            {
+                offset += 2;
+
+                for (int i = 0; i < 3; i++)
+                {
+                    bool positive = buffer[offset] != '-';
+
+                    if (positive != true)
+                    {
+                        offset++;
+                    }
+
+                    unsigned integralPart = buffer[offset] - '0';
+                    offset += 2; // Skip decimal point as well.
+
+                    unsigned fractionalPart = 0; // As an integer.
+                    unsigned multiplier = 1000000;
+                    for (int j = 0; j < 7; j++)
+                    {
+                        fractionalPart += (buffer[offset] - '0') * multiplier;
+                        multiplier /= 10;
+
+                        offset++;
+                    }
+
+                    offset++; // Skip exponent symbol.
+
+                    bool positiveExponent = buffer[offset] != '-';
+
+                    if (positiveExponent != true)
+                    {
+                        offset++;
+                    }
+
+                    unsigned exponent = 0;
+                    unsigned exponentMultiplier = 100;
+                    for (int j = 0; j < 3; j++)
+                    {
+                        exponent += (buffer[offset] - '0') * exponentMultiplier;
+                        exponentMultiplier /= 10;
+
+                        offset++;
+                    }
+
+                    offset++; // Skip space/newline.
+
+                    float normaliser = 1.0f;
+                    for (int j = 0; j < exponent; j++)
+                    {
+                        if (positiveExponent)
+                        {
+                            normaliser *= 10.0f;
+                        }
+                        else
+                        {
+                            normaliser /= 10.0f;
+                        }
+                    }
+
+                    float result = ((float)integralPart + (fractionalPart / 10000000.0f)) * normaliser * (positive ? 1.0f : -1.0f);
+
+                    vertexData[vertexDataIndex * 3 + i] = result;
+                }
+
+                printf("v %f %f %f\n", vertexData[vertexDataIndex * 3 + 0], vertexData[vertexDataIndex * 3 + 1], vertexData[vertexDataIndex * 3 + 2]);
+
+                vertexDataIndex++;
+            }
+            else if (strncmp("f", buffer + offset, 1) == 0)
+            {
+                offset += 2;
+
+                for (int i = 0; i < 3; i++)
+                {
+                    unsigned digitCount = 0;
+                    unsigned digits[8] = {};
+
+                    while (buffer[offset] != ' ' && buffer[offset] != '\n')
+                    {
+                        digits[digitCount] = buffer[offset] - '0';
+
+                        offset++;
+                        digitCount++;
+                    }
+
+                    offset++;
+
+                    unsigned result = 0;
+                    unsigned multiplier = 1;
+
+                    for (int j = 0; j < digitCount; j++)
+                    {
+                        result += digits[digitCount - 1 - j] * multiplier;
+
+                        multiplier *= 10;
+                    }
+
+                    indexData[indexDataIndex * 3 + i] = result;
+                }
+
+                printf("f %u %u %u\n", indexData[indexDataIndex * 3 + 0], indexData[indexDataIndex * 3 + 1], indexData[indexDataIndex * 3 + 2]);
+
+                indexDataIndex++;
+            }
+            else
+            {
+                while (buffer[offset] != '\n')
+                {
+                    offset++;
+                }
+
+                offset++;
+            }
+        }
+    }
+};
+
+// MARK: Renderer frontmatter
+
 const uint32_t MAX_FRAMES_IN_FLIGHT = 2;
 
 const std::array<const char *, 1> requiredInstanceLayers = {
@@ -1574,6 +1747,8 @@ DWORD createRendererThread(LPVOID lpParameter)
 
 int main(int argc, char *argv[])
 {
+    Obj("res/bunny.obj");
+
     printf("Hello, World!\n");
 
     HINSTANCE hInstance = NULL;
