@@ -4,6 +4,8 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -47,7 +49,7 @@ struct UniformBufferObject
 
 struct Vertex
 {
-    glm::vec2 pos;
+    glm::vec3 pos;
     glm::vec3 color;
 
     static VkVertexInputBindingDescription getBindingDescription()
@@ -66,7 +68,7 @@ struct Vertex
         VkVertexInputAttributeDescription positionsDescription = {
             .location = 0,
             .binding = 0,
-            .format = VK_FORMAT_R32G32_SFLOAT,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
             .offset = offsetof(Vertex, pos),
         };
 
@@ -87,22 +89,22 @@ struct Vertex
 };
 
 const std::array<Vertex, 6> middleTrapezoid = {{
-    {{0.5f, -0.5f}, {1.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f}, {1.0f, 1.0f, 0.0f}},
-    {{-0.4f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.4f, 0.5f}, {1.0f, 1.0f, 1.0f}},
+    {{0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
+    {{-0.4f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
+    {{0.4f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},
 }};
 
 const std::array<uint32_t, 6> middleTrapezoidIndices = {
     0, 1, 2, 0, 3, 1};
 
 const std::array<Vertex, 6> upperTrapezoid = {{
-    {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
-    {{-0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.4f, -1.0f}, {1.0f, 0.5f, 0.0f}},
-    {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
-    {{0.4f, 0.0f}, {1.0f, 1.0f, 1.0f}},
-    {{-0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, -1.0f, -0.5f}, {0.0f, 0.5f, 1.0f}},
+    {{-0.5f, 0.0f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.4f, -1.0f, -0.5f}, {1.0f, 0.5f, 0.0f}},
+    {{0.5f, -1.0f, -0.5f}, {0.0f, 0.5f, 1.0f}},
+    {{0.4f, 0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
+    {{-0.5f, 0.0f, -0.5f}, {0.0f, 1.0f, 0.0f}},
 }};
 
 // TODO: Replace with a proper interface after factoring classes out.
@@ -336,6 +338,8 @@ public:
 
     void cleanupSwapchain()
     {
+        if (depthImageView != NULL)
+            vkDestroyImageView(device, depthImageView, NULL);
         for (auto &view : swapchainImageViews)
             vkDestroyImageView(device, view, NULL);
         if (swapchain != NULL)
@@ -348,6 +352,7 @@ public:
 
         cleanupSwapchain();
         createSwapchain();
+        createDepthResources();
     }
 
     // TODO: Use a push constant for this.
@@ -363,7 +368,7 @@ public:
         // TODO: Use the right GLM define so that angles can be input in degrees.
         ubo.model = glm::rotate(glm::mat4(1.0f), elapsed * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.proj = glm::perspective(glm::radians(45.0f), (float)extent.width / extent.height, 0.1f, 10.0f);
+        ubo.proj = glm::perspective(glm::radians(45.0f), (float)extent.width / (float)extent.height, 0.1f, 10.0f);
 
         memcpy(uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
     }
@@ -462,9 +467,10 @@ public:
         vkBeginCommandBuffer(commandBuffers[currentFrame], &beginInfo);
 
         transitionSwapchainImageLayout(imageIndex, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
+        transitionImageLayout(depthImage, VK_FORMAT_D32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
         VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
-        VkRenderingAttachmentInfo attachmentInfo = {
+        VkRenderingAttachmentInfo colorAttachmentInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = swapchainImageViews[imageIndex],
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -472,6 +478,33 @@ public:
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue = clearColor,
         };
+
+        VkImageMemoryBarrier2 depthBarrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = depthImage,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        VkDependencyInfo depthDependencyInfo = {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &depthBarrier,
+        };
+
+        vkCmdPipelineBarrier2(commandBuffers[currentFrame], &depthDependencyInfo);
 
         VkRect2D scissor = {
             .offset = {0, 0},
@@ -487,12 +520,24 @@ public:
             .maxDepth = 1.0f,
         };
 
+        VkClearValue clearDepth = {1.0f, 0};
+
+        VkRenderingAttachmentInfo depthAttachmentInfo = {
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = depthImageView,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue = clearDepth,
+        };
+
         VkRenderingInfo renderingInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
             .renderArea = scissor,
             .layerCount = 1,
             .colorAttachmentCount = 1,
-            .pColorAttachments = &attachmentInfo,
+            .pColorAttachments = &colorAttachmentInfo,
+            .pDepthAttachment = &depthAttachmentInfo,
         };
 
         vkCmdBeginRendering(commandBuffers[currentFrame], &renderingInfo);
@@ -521,6 +566,155 @@ public:
     }
 
     // MARK: Renderer: Init Vk res
+
+    void transitionImageLayout(const VkImage &image, const VkFormat &format, VkImageLayout oldLayout, VkImageLayout newLayout)
+    {
+        VkCommandBuffer transitionCommandBuffer = beginSingleTimeCommands();
+
+        VkImageMemoryBarrier barrier = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+            .oldLayout = oldLayout,
+            .newLayout = newLayout,
+            .image = image,
+            .subresourceRange = {
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        VkPipelineStageFlags sourceStage = NULL;
+        VkPipelineStageFlags destinationStage = NULL;
+
+        if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)
+        {
+            barrier.srcAccessMask = NULL;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destinationStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        }
+        else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        {
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            sourceStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            destinationStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+        {
+            barrier.srcAccessMask = NULL;
+            barrier.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+            sourceStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            destinationStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        }
+        else
+            printf("Invalid layout transition\n");
+
+        if (format == VK_FORMAT_D32_SFLOAT)
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        else
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+        // TODO: Use `vkCmdPipelineBarrier2`.
+        vkCmdPipelineBarrier(transitionCommandBuffer, sourceStage, destinationStage, NULL, 0, NULL, 0, NULL, 1, &barrier);
+
+        endSingleTimeCommands(std::move(transitionCommandBuffer));
+    }
+
+    // Begins a single-time command buffer on the graphics queue.
+    VkCommandBuffer beginSingleTimeCommands()
+    {
+        VkCommandBufferAllocateInfo commandBufferAllocateInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = commandPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+
+        VkCommandBuffer singleTimeCommandBuffer = NULL;
+
+        vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &singleTimeCommandBuffer);
+
+        VkCommandBufferBeginInfo commandBufferBeginInfo = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        };
+
+        vkBeginCommandBuffer(singleTimeCommandBuffer, &commandBufferBeginInfo);
+
+        return singleTimeCommandBuffer;
+    }
+
+    void endSingleTimeCommands(VkCommandBuffer &&singleTimeCommandBuffer)
+    {
+        vkEndCommandBuffer(singleTimeCommandBuffer);
+
+        VkSubmitInfo submitInfo = {
+            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            .commandBufferCount = 1,
+            .pCommandBuffers = &singleTimeCommandBuffer,
+        };
+
+        vkQueueSubmit(graphicsQueue, 1, &submitInfo, NULL);
+
+        vkQueueWaitIdle(graphicsQueue);
+    }
+
+    void createDepthResources()
+    {
+        // Creating the depth image.
+
+        VkImageCreateInfo imageInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .extent = {extent.width, extent.height, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        };
+
+        vkCreateImage(device, &imageInfo, NULL, &depthImage);
+
+        VkMemoryRequirements imageMemoryRequirements = {};
+
+        vkGetImageMemoryRequirements(device, depthImage, &imageMemoryRequirements);
+
+        VkMemoryAllocateInfo imageMemoryAllocateInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = imageMemoryRequirements.size,
+            .memoryTypeIndex = getBufferMemoryTypeBitOrder(imageMemoryRequirements, (VkMemoryPropertyFlagBits)VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT),
+        };
+
+        vkAllocateMemory(device, &imageMemoryAllocateInfo, NULL, &depthImageMemory);
+
+        vkBindImageMemory(device, depthImage, depthImageMemory, 0);
+
+        // Creating the depth image view.
+
+        VkImageViewCreateInfo depthImageViewInfo = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = depthImage,
+            .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_D32_SFLOAT,
+            .subresourceRange = {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+
+        vkCreateImageView(device, &depthImageViewInfo, NULL, &depthImageView);
+    }
 
     // TODO: Rework this so it's only used when necessary (i.e. when there's no graphics queue family with transfer).
     // TODO: Rework this so it can be done at draw time and more efficiently, e.g. keeping staging buffers mapped and doing the operations as part of the graphics pipeline by using barriers.
@@ -759,7 +953,7 @@ public:
             VkMemoryAllocateInfo memoryAllocateInfo = {
                 .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                 .allocationSize = sizeof(UniformBufferObject),
-                .memoryTypeIndex = getBufferMemoryTypeBitOrder(memoryRequirements, (VkMemoryPropertyFlagBits) (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)),
+                .memoryTypeIndex = getBufferMemoryTypeBitOrder(memoryRequirements, (VkMemoryPropertyFlagBits)(VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)),
             };
 
             vkAllocateMemory(device, &memoryAllocateInfo, NULL, &uniformBuffersMemory[i]);
@@ -770,7 +964,6 @@ public:
 
             vkCreateDescriptorSetLayout(device, &descriptorSetLayoutInfo, NULL, &descriptorSetLayouts[i]);
         }
-
 
         VkDescriptorPoolSize descriptorPoolSize = {
             .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -787,7 +980,7 @@ public:
         vkCreateDescriptorPool(device, &descriptorPoolInfo, NULL, &descriptorPool);
 
         VkDescriptorSetAllocateInfo descriptorSetAllocateInfo = {
-            .sType= VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
             .descriptorPool = descriptorPool,
             .descriptorSetCount = (uint32_t)descriptorSetLayouts.size(),
             .pSetLayouts = descriptorSetLayouts.data(),
@@ -795,7 +988,7 @@ public:
 
         vkAllocateDescriptorSets(device, &descriptorSetAllocateInfo, descriptorSets.data());
 
-        for (uint32_t i = 0 ; i < MAX_FRAMES_IN_FLIGHT; i++)
+        for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++)
         {
             VkDescriptorBufferInfo descriptorBufferInfo = {
                 .buffer = uniformBuffers[i],
@@ -808,7 +1001,7 @@ public:
                 .dstSet = descriptorSets[i],
                 .dstBinding = 0,
                 .dstArrayElement = 0,
-                .descriptorCount =1,
+                .descriptorCount = 1,
                 .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                 .pBufferInfo = &descriptorBufferInfo,
             };
@@ -856,7 +1049,6 @@ public:
             .polygonMode = VK_POLYGON_MODE_FILL,
             .cullMode = VK_CULL_MODE_BACK_BIT,
             .frontFace = VK_FRONT_FACE_CLOCKWISE,
-            .depthBiasSlopeFactor = 1.0f,
             .lineWidth = 1.0f,
         };
 
@@ -886,11 +1078,19 @@ public:
             .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
             .colorAttachmentCount = 1,
             .pColorAttachmentFormats = &swapchainSurfaceFormat.format,
+            .depthAttachmentFormat = VK_FORMAT_D32_SFLOAT,
         };
 
         VkPipelineMultisampleStateCreateInfo multisamplesStateInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
             .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        };
+
+        VkPipelineDepthStencilStateCreateInfo depthStencilStateInfo = {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+            .depthTestEnable = VK_TRUE,
+            .depthWriteEnable = VK_TRUE,
+            .depthCompareOp = VK_COMPARE_OP_LESS,
         };
 
         VkGraphicsPipelineCreateInfo graphicsPipelineInfo = {
@@ -903,6 +1103,7 @@ public:
             .pViewportState = &viewportStateInfo,
             .pRasterizationState = &rasterizationStateInfo,
             .pMultisampleState = &multisamplesStateInfo,
+            .pDepthStencilState = &depthStencilStateInfo,
             .pColorBlendState = &colorBlendStateInfo,
             .pDynamicState = &dynamicStateInfo,
             .layout = pipelineLayout,
@@ -983,6 +1184,7 @@ public:
                 printf("Fence creation failed\n");
 
         transferData();
+        createDepthResources();
     }
 
     // MARK: Renderer: Init Vk
@@ -1230,6 +1432,10 @@ private:
     VkViewport viewport = {};
     VkExtent2D extent = {};
 
+    VkImage depthImage = NULL;
+    VkDeviceMemory depthImageMemory = NULL;
+    VkImageView depthImageView = NULL;
+
     VkShaderModule shaderModule = NULL;
     VkPipelineLayout pipelineLayout = NULL;
     VkPipeline pipeline = NULL;
@@ -1254,7 +1460,7 @@ private:
 
     std::vector<VkBuffer> uniformBuffers = {};
     std::vector<VkDeviceMemory> uniformBuffersMemory = {};
-    std::vector<void*> uniformBuffersMapped = {};
+    std::vector<void *> uniformBuffersMapped = {};
 
     std::vector<VkDescriptorSetLayout> descriptorSetLayouts = {};
     VkDescriptorPool descriptorPool = NULL;

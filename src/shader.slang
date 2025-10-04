@@ -20,7 +20,7 @@ struct VertexOutput {
 [shader("vertex")]
 VertexOutput vertexShader(VertexInput input) {
     VertexOutput output;
-    output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.pos, 0.0, 1.0))));
+    output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.pos, 1.0f))));
     output.color = input.color;
     return output;
 };
