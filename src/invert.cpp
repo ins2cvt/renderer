@@ -17,13 +17,22 @@
 
 // MARK: Obj loader
 
-// TODO: Make the loader work for all possible variations of the data and extract all the data.
+// TODO: Make the loader work for all possible variations of the data and extract all the data. There are debug `printf` that are commented out in case this misbehaves.
 struct Obj
 {
-    float *vertexData = nullptr;
-    unsigned numVertexLines = 0;
-    unsigned *indexData = nullptr;
-    unsigned numIndexLines = 0;
+    alignas(16) float *vertexData = nullptr;
+    unsigned vertexDataSize = 0;
+    alignas(16) unsigned *indexData = nullptr;
+    unsigned indexDataSize = 0;
+    unsigned numIndices = 0;
+
+    ~Obj()
+    {
+        if (vertexData != nullptr)
+            free(vertexData);
+        if (indexData != nullptr)
+            free(indexData);
+    }
 
     // TODO: Chunked reads.
     Obj(const char *filename)
@@ -35,6 +44,9 @@ struct Obj
         char *buffer = (char *)malloc(size);
         fread(buffer, 1, size, file);
         fclose(file);
+
+        unsigned numVertexLines = 0;
+        unsigned numIndexLines = 0;
 
         unsigned offset = 0;
 
@@ -58,8 +70,13 @@ struct Obj
             offset++;
         }
 
-        vertexData = (float *)malloc(sizeof(float) * numVertexLines * 3);
-        indexData = (unsigned *)malloc(sizeof(unsigned) * numIndexLines * 3);
+        vertexDataSize = sizeof(float) * numVertexLines * 4;
+        indexDataSize = sizeof(unsigned) * numIndexLines * 3;
+        numIndices = numVertexLines * 3;
+
+        // To satisfy std430 requirements for `vec3`s.
+        vertexData = (float *)malloc(vertexDataSize);
+        indexData = (unsigned *)malloc(indexDataSize);
 
         offset = 0;
 
@@ -130,31 +147,33 @@ struct Obj
 
                     float result = ((float)integralPart + (fractionalPart / 10000000.0f)) * normaliser * (positive ? 1.0f : -1.0f);
 
-                    vertexData[vertexDataIndex * 3 + i] = result;
+                    vertexData[vertexDataIndex * 4 + i] = result;
                 }
 
-                printf("v %f %f %f\n", vertexData[vertexDataIndex * 3 + 0], vertexData[vertexDataIndex * 3 + 1], vertexData[vertexDataIndex * 3 + 2]);
+                // printf("v %f %f %f\n", vertexData[vertexDataIndex * 4 + 0], vertexData[vertexDataIndex * 4 + 1], vertexData[vertexDataIndex * 4 + 2]);
 
                 vertexDataIndex++;
             }
             else if (strncmp("f", buffer + offset, 1) == 0)
             {
-                offset += 2;
+                offset += 2; // Skips 'f '.
 
                 for (int i = 0; i < 3; i++)
                 {
                     unsigned digitCount = 0;
                     unsigned digits[8] = {};
 
-                    while (buffer[offset] != ' ' && buffer[offset] != '\n')
+                    while (buffer[offset] <= '9' && buffer[offset] >= '0')
                     {
                         digits[digitCount] = buffer[offset] - '0';
 
-                        offset++;
+                        offset++; // Skips digits only.
                         digitCount++;
                     }
 
-                    offset++;
+                    // Additional CRLF check due to Stanford bunny using it on index lines but not vertex lines.
+                    while (buffer[offset] == ' ' || buffer[offset] == 0x0A || buffer[offset] == 0x0D)
+                        offset++; // Skips space or newline.
 
                     unsigned result = 0;
                     unsigned multiplier = 1;
@@ -166,10 +185,10 @@ struct Obj
                         multiplier *= 10;
                     }
 
-                    indexData[indexDataIndex * 3 + i] = result;
+                    indexData[indexDataIndex * 3 + i] = result - 1;
                 }
 
-                printf("f %u %u %u\n", indexData[indexDataIndex * 3 + 0], indexData[indexDataIndex * 3 + 1], indexData[indexDataIndex * 3 + 2]);
+                // printf("f %u %u %u\n", indexData[indexDataIndex * 3 + 0], indexData[indexDataIndex * 3 + 1], indexData[indexDataIndex * 3 + 2]);
 
                 indexDataIndex++;
             }
@@ -183,6 +202,33 @@ struct Obj
                 offset++;
             }
         }
+    }
+
+    VkVertexInputBindingDescription getBindingDescription()
+    {
+        VkVertexInputBindingDescription bindingDescription = {
+            .binding = 0,
+            .stride = sizeof(float) * 4,
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+
+        return bindingDescription;
+    }
+
+    std::array<VkVertexInputAttributeDescription, 1> getAttributeDescription()
+    {
+        VkVertexInputAttributeDescription positionsDescription = {
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .offset = 0,
+        };
+
+        std::array<VkVertexInputAttributeDescription, 1> attributeDescriptions = {
+            positionsDescription,
+        };
+
+        return attributeDescriptions;
     }
 };
 
@@ -259,23 +305,6 @@ struct Vertex
 
         return attributeDescriptions;
     }
-};
-
-const std::array<Vertex, 8> middleTrapezoids = {{
-    {{0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
-    {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
-    {{-0.4f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
-    {{0.4f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},
-
-    {{0.6f, -0.4f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.4f, 0.6f, -0.5f}, {0.0f, 0.0f, 1.0f}},
-    {{-0.3f, -0.4f, -0.5f}, {0.0f, 1.0f, 1.0f}},
-    {{0.5f, 0.6f, -0.5f}, {0.0f, 0.0f, 0.0f}},
-}};
-
-const std::array<uint32_t, 12> middleTrapezoidIndices = {
-    0, 1, 2, 0, 3, 1, //
-    4, 5, 6, 4, 7, 5, //
 };
 
 const std::array<Vertex, 6> upperTrapezoid = {{
@@ -545,9 +574,13 @@ public:
 
         UniformBufferObject ubo = {};
 
+        glm::vec3 cameraPosition = glm::vec3(0.25f, 0.25f, 0.25f);
+        glm::vec3 cameraFocus = glm::vec3(0.0f, 0.0f, 0.0f);
+        cameraAngle = cameraFocus - cameraPosition;
+
         // TODO: Use the right GLM define so that angles can be input in degrees.
         ubo.model = glm::rotate(glm::mat4(1.0f), elapsed * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.view = glm::lookAt(glm::vec3(2.0f, 2.0f, 2.0f), glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.view = glm::lookAt(cameraPosition, cameraFocus, glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.proj = glm::perspective(glm::radians(45.0f), (float)extent.width / (float)extent.height, 0.1f, 10.0f);
 
         memcpy(uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
@@ -724,6 +757,8 @@ public:
 
         vkCmdBindPipeline(commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
+        vkCmdPushConstants(commandBuffers[currentFrame], pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::vec3), &cameraAngle);
+
         vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
         vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
 
@@ -733,10 +768,10 @@ public:
 
         vkCmdBindIndexBuffer(commandBuffers[currentFrame], indexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &vertexBuffer, &offset);
-        vkCmdDrawIndexed(commandBuffers[currentFrame], middleTrapezoidIndices.size(), 1, 0, 0, 0);
+        vkCmdDrawIndexed(commandBuffers[currentFrame], stanfordBunny.numIndices, 1, 0, 0, 0);
 
-        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &transferBuffer, &offset);
-        vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
+        // vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &transferBuffer, &offset);
+        // vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
 
         vkCmdEndRendering(commandBuffers[currentFrame]);
 
@@ -1008,7 +1043,7 @@ public:
 
         VkBufferCreateInfo vertexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(Vertex) * middleTrapezoids.size(),
+            .size = stanfordBunny.vertexDataSize,
             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -1031,7 +1066,7 @@ public:
         void *vertexData = nullptr;
         vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &vertexData);
 
-        memcpy(vertexData, middleTrapezoids.data(), vertexBufferInfo.size);
+        memcpy(vertexData, stanfordBunny.vertexData, vertexBufferInfo.size);
 
         vkUnmapMemory(device, vertexBufferMemory);
 
@@ -1040,7 +1075,7 @@ public:
 
         VkBufferCreateInfo indexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(middleTrapezoidIndices[0]) * middleTrapezoidIndices.size(),
+            .size = stanfordBunny.indexDataSize,
             .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -1049,14 +1084,14 @@ public:
         vkGetBufferMemoryRequirements(device, indexBuffer, &indexMemoryRequirements);
         VkMemoryAllocateInfo indexAllocateInfo = {
             .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-            .allocationSize = vertexMemoryRequirements.size,
+            .allocationSize = indexMemoryRequirements.size,
             .memoryTypeIndex = getBufferMemoryTypeBitOrder(indexMemoryRequirements, (VkMemoryPropertyFlagBits)(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)),
         };
         vkAllocateMemory(device, &indexAllocateInfo, NULL, &indexBufferMemory);
         vkBindBufferMemory(device, indexBuffer, indexBufferMemory, 0);
         void *indexData = nullptr;
         vkMapMemory(device, indexBufferMemory, 0, indexBufferInfo.size, NULL, &indexData);
-        memcpy(indexData, middleTrapezoidIndices.data(), indexBufferInfo.size);
+        memcpy(indexData, stanfordBunny.indexData, indexBufferInfo.size);
         vkUnmapMemory(device, indexBufferMemory);
 
         // Graphics pipeline creation.
@@ -1189,8 +1224,8 @@ public:
             vkUpdateDescriptorSets(device, 1, &writeDescriptorSet, 0, NULL);
         }
 
-        auto bindingDescription = Vertex::getBindingDescription();
-        auto attributeDescriptions = Vertex::getAttributeDescription();
+        auto bindingDescription = stanfordBunny.getBindingDescription();
+        auto attributeDescriptions = stanfordBunny.getAttributeDescription();
 
         VkPipelineVertexInputStateCreateInfo vertexInputStateInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
@@ -1245,11 +1280,18 @@ public:
             .pAttachments = &colorBlendAttachmentState,
         };
 
+        VkPushConstantRange pushConstantRange = {
+            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+            .offset = 0,
+            .size = sizeof(glm::vec3),
+        };
+
         VkPipelineLayoutCreateInfo pipelineLayoutInfo = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
             .setLayoutCount = (uint32_t)descriptorSetLayouts.size(),
             .pSetLayouts = descriptorSetLayouts.data(),
-            .pushConstantRangeCount = 0,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges = &pushConstantRange,
         };
 
         vkCreatePipelineLayout(device, &pipelineLayoutInfo, NULL, &pipelineLayout);
@@ -1645,6 +1687,10 @@ private:
     std::vector<VkDescriptorSetLayout> descriptorSetLayouts = {};
     VkDescriptorPool descriptorPool = NULL;
     std::vector<VkDescriptorSet> descriptorSets = {};
+
+    Obj stanfordBunny = Obj("./res/bunny.obj");
+
+    glm::vec3 cameraAngle = {};
 };
 
 // MARK: Window class
