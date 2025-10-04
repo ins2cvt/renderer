@@ -8,7 +8,7 @@ ConstantBuffer<UniformBuffer> ubo;
 
 struct VertexInput
 {
-    float2 pos;
+    float3 pos;
     float3 color;
 };
 
