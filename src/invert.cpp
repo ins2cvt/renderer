@@ -88,23 +88,30 @@ struct Vertex
     }
 };
 
-const std::array<Vertex, 6> middleTrapezoid = {{
+const std::array<Vertex, 8> middleTrapezoids = {{
     {{0.5f, -0.5f, 0.0f}, {1.0f, 0.0f, 1.0f}},
     {{-0.5f, 0.5f, 0.0f}, {1.0f, 1.0f, 0.0f}},
     {{-0.4f, -0.5f, 0.0f}, {1.0f, 0.0f, 0.0f}},
     {{0.4f, 0.5f, 0.0f}, {1.0f, 1.0f, 1.0f}},
+
+    {{0.6f, -0.4f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.4f, 0.6f, -0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.3f, -0.4f, -0.5f}, {0.0f, 1.0f, 1.0f}},
+    {{0.5f, 0.6f, -0.5f}, {0.0f, 0.0f, 0.0f}},
 }};
 
-const std::array<uint32_t, 6> middleTrapezoidIndices = {
-    0, 1, 2, 0, 3, 1};
+const std::array<uint32_t, 12> middleTrapezoidIndices = {
+    0, 1, 2, 0, 3, 1, //
+    4, 5, 6, 4, 7, 5, //
+};
 
 const std::array<Vertex, 6> upperTrapezoid = {{
-    {{0.5f, -1.0f, -0.5f}, {0.0f, 0.5f, 1.0f}},
-    {{-0.5f, 0.0f, -0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.4f, -1.0f, -0.5f}, {1.0f, 0.5f, 0.0f}},
-    {{0.5f, -1.0f, -0.5f}, {0.0f, 0.5f, 1.0f}},
-    {{0.4f, 0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{-0.5f, 0.0f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, -1.0f, 0.5f}, {0.0f, 0.5f, 1.0f}},
+    {{-0.5f, 0.0f, 0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{-0.4f, -1.0f, 0.5f}, {1.0f, 0.5f, 0.0f}},
+    {{0.5f, -1.0f, 0.5f}, {0.0f, 0.5f, 1.0f}},
+    {{0.4f, 0.0f, 0.5f}, {1.0f, 1.0f, 1.0f}},
+    {{-0.5f, 0.0f, 0.5f}, {0.0f, 1.0f, 0.0f}},
 }};
 
 // TODO: Replace with a proper interface after factoring classes out.
@@ -828,7 +835,7 @@ public:
 
         VkBufferCreateInfo vertexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(middleTrapezoid[0]) * middleTrapezoid.size(),
+            .size = sizeof(Vertex) * middleTrapezoids.size(),
             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -851,7 +858,7 @@ public:
         void *vertexData = nullptr;
         vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &vertexData);
 
-        memcpy(vertexData, middleTrapezoid.data(), vertexBufferInfo.size);
+        memcpy(vertexData, middleTrapezoids.data(), vertexBufferInfo.size);
 
         vkUnmapMemory(device, vertexBufferMemory);
 
