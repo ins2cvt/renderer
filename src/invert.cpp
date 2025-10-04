@@ -77,7 +77,7 @@ struct Vertex
     }
 };
 
-const std::array<Vertex, 6> trapezoid = {{
+const std::array<Vertex, 6> middleTrapezoid = {{
     {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
     {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.4f, -0.5f}, {1.0f, 0.0f, 0.0f}},
@@ -86,7 +86,7 @@ const std::array<Vertex, 6> trapezoid = {{
     {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
 }};
 
-const std::array<Vertex, 6> diamond = {{
+const std::array<Vertex, 6> upperTrapezoid = {{
     {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
     {{-0.5f, 0.0f}, {0.0f, 1.0f, 0.0f}},
     {{-0.4f, -1.0f}, {1.0f, 0.5f, 0.0f}},
@@ -472,12 +472,15 @@ public:
             0,
             0,
         };
-        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 2, buffers.data(), offsets.data());
 
         vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
         vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
 
-        vkCmdDraw(commandBuffers[currentFrame], 12, 1, 0, 0);
+        for (uint32_t i = 0; i < buffers.size(); i++)
+        {
+            vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &buffers[i], &offsets[i]);
+            vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
+        }
 
         vkCmdEndRendering(commandBuffers[currentFrame]);
 
@@ -488,7 +491,8 @@ public:
 
     // MARK: Renderer: Init Vk res
 
-    // TODO: Rework this so it's only used when necessary (i.e. when there's no graphics queue family with transfer)
+    // TODO: Rework this so it's only used when necessary (i.e. when there's no graphics queue family with transfer).
+    // TODO: Rework this so it can be done at draw time and more efficiently, e.g. keeping staging buffers mapped and doing the operations as part of the graphics pipeline by using barriers.
     void transferData()
     {
         std::array<uint32_t, 2> queueFamilyIndices = {
@@ -498,7 +502,7 @@ public:
 
         VkBufferCreateInfo stagingBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(diamond[0]) * diamond.size(),
+            .size = sizeof(upperTrapezoid[0]) * upperTrapezoid.size(),
             .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
             .sharingMode = VK_SHARING_MODE_CONCURRENT,
             .queueFamilyIndexCount = (uint32_t)queueFamilyIndices.size(),
@@ -527,12 +531,12 @@ public:
         void *data = nullptr;
 
         vkMapMemory(device, stagingMemory, 0, stagingBufferInfo.size, NULL, &data);
-        memcpy(data, diamond.data(), stagingBufferInfo.size);
+        memcpy(data, upperTrapezoid.data(), stagingBufferInfo.size);
         vkUnmapMemory(device, stagingMemory);
 
         VkBufferCreateInfo destinationBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(diamond[0]) * diamond.size(),
+            .size = sizeof(upperTrapezoid[0]) * upperTrapezoid.size(),
             .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -563,15 +567,15 @@ public:
         vkCmdCopyBuffer(transferCommandBuffer, stagingBuffer, transferBuffer, 1, &bufferCopyRegion);
 
         vkEndCommandBuffer(transferCommandBuffer);
-        
+
         VkSubmitInfo submitInfo = {
             .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
             .commandBufferCount = 1,
             .pCommandBuffers = &transferCommandBuffer,
         };
-        
+
         vkQueueSubmit(transferQueue, 1, &submitInfo, NULL);
-        
+
         vkQueueWaitIdle(transferQueue);
     }
 
@@ -599,7 +603,7 @@ public:
 
         VkBufferCreateInfo vertexBufferInfo = {
             .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-            .size = sizeof(trapezoid[0]) * trapezoid.size(),
+            .size = sizeof(middleTrapezoid[0]) * middleTrapezoid.size(),
             .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
             .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         };
@@ -626,7 +630,7 @@ public:
         void *data = nullptr;
         vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &data);
 
-        memcpy(data, trapezoid.data(), vertexBufferInfo.size);
+        memcpy(data, middleTrapezoid.data(), vertexBufferInfo.size);
 
         vkUnmapMemory(device, vertexBufferMemory);
 
