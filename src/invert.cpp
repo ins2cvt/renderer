@@ -81,10 +81,11 @@ const std::array<Vertex, 6> middleTrapezoid = {{
     {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
     {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.4f, -0.5f}, {1.0f, 0.0f, 0.0f}},
-    {{0.5f, -0.5f}, {0.0f, 0.0f, 1.0f}},
     {{0.4f, 0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
 }};
+
+const std::array<uint32_t, 6> middleTrapezoidIndices = {
+    0, 1, 2, 0, 3, 1};
 
 const std::array<Vertex, 6> upperTrapezoid = {{
     {{0.5f, -1.0f}, {0.0f, 0.5f, 1.0f}},
@@ -185,6 +186,10 @@ public:
                 vkDestroyBuffer(device, vertexBuffer, NULL);
             if (vertexBufferMemory != NULL)
                 vkFreeMemory(device, vertexBufferMemory, NULL);
+            if (indexBuffer != NULL)
+                vkDestroyBuffer(device, indexBuffer, NULL);
+            if (indexBufferMemory != NULL)
+                vkFreeMemory(device, indexBufferMemory, NULL);
             for (auto &fence : inflightFences)
                 if (fence != NULL)
                     vkDestroyFence(device, fence, NULL);
@@ -464,23 +469,17 @@ public:
 
         vkCmdBindPipeline(commandBuffers[currentFrame], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        std::array<VkBuffer, 2> buffers = {
-            vertexBuffer,
-            transferBuffer,
-        };
-        std::array<VkDeviceSize, 2> offsets = {
-            0,
-            0,
-        };
-
         vkCmdSetViewport(commandBuffers[currentFrame], 0, 1, &viewport);
         vkCmdSetScissor(commandBuffers[currentFrame], 0, 1, &scissor);
 
-        for (uint32_t i = 0; i < buffers.size(); i++)
-        {
-            vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &buffers[i], &offsets[i]);
-            vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
-        }
+        VkDeviceSize offset = 0;
+
+        vkCmdBindIndexBuffer(commandBuffers[currentFrame], indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &vertexBuffer, &offset);
+        vkCmdDrawIndexed(commandBuffers[currentFrame], middleTrapezoidIndices.size(), 1, 0, 0, 0);
+
+        vkCmdBindVertexBuffers(commandBuffers[currentFrame], 0, 1, &transferBuffer, &offset);
+        vkCmdDraw(commandBuffers[currentFrame], 6, 1, 0, 0);
 
         vkCmdEndRendering(commandBuffers[currentFrame]);
 
@@ -613,10 +612,6 @@ public:
         VkMemoryRequirements vertexMemoryRequirements = {};
         vkGetBufferMemoryRequirements(device, vertexBuffer, &vertexMemoryRequirements);
 
-        VkPhysicalDeviceMemoryProperties2 vertexMemoryProperties = {
-            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2,
-        };
-
         VkMemoryAllocateInfo memoryAllocateInfo = {
             .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
             .allocationSize = vertexMemoryRequirements.size,
@@ -627,12 +622,35 @@ public:
 
         vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
 
-        void *data = nullptr;
-        vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &data);
+        void *vertexData = nullptr;
+        vkMapMemory(device, vertexBufferMemory, 0, vertexBufferInfo.size, NULL, &vertexData);
 
-        memcpy(data, middleTrapezoid.data(), vertexBufferInfo.size);
+        memcpy(vertexData, middleTrapezoid.data(), vertexBufferInfo.size);
 
         vkUnmapMemory(device, vertexBufferMemory);
+
+        // TODO: Deduplicate code above and below.
+
+        VkBufferCreateInfo indexBufferInfo = {
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .size = sizeof(middleTrapezoidIndices[0]) * middleTrapezoidIndices.size(),
+            .usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        };
+        vkCreateBuffer(device, &indexBufferInfo, NULL, &indexBuffer);
+        VkMemoryRequirements indexMemoryRequirements = {};
+        vkGetBufferMemoryRequirements(device, indexBuffer, &indexMemoryRequirements);
+        VkMemoryAllocateInfo indexAllocateInfo = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            .allocationSize = vertexMemoryRequirements.size,
+            .memoryTypeIndex = getBufferMemoryTypeBitOrder(indexMemoryRequirements, (VkMemoryPropertyFlagBits)(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)),
+        };
+        vkAllocateMemory(device, &indexAllocateInfo, NULL, &indexBufferMemory);
+        vkBindBufferMemory(device, indexBuffer, indexBufferMemory, 0);
+        void *indexData = nullptr;
+        vkMapMemory(device, indexBufferMemory, 0, indexBufferInfo.size, NULL, &indexData);
+        memcpy(indexData, middleTrapezoidIndices.data(), indexBufferInfo.size);
+        vkUnmapMemory(device, indexBufferMemory);
 
         // Graphics pipeline creation.
 
@@ -1101,6 +1119,8 @@ private:
 
     VkDeviceMemory vertexBufferMemory = NULL;
     VkBuffer vertexBuffer = NULL;
+    VkDeviceMemory indexBufferMemory = NULL;
+    VkBuffer indexBuffer = NULL;
     VkDeviceMemory transferBufferMemory = NULL;
     VkBuffer transferBuffer = NULL;
 };
