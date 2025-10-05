@@ -21,8 +21,8 @@
 struct Obj
 {
     alignas(16) float *vertexData = nullptr;
-    unsigned vertexDataSize = 0;
     alignas(16) unsigned *indexData = nullptr;
+    unsigned vertexDataSize = 0;
     unsigned indexDataSize = 0;
     unsigned numIndices = 0;
 
@@ -72,7 +72,7 @@ struct Obj
 
         vertexDataSize = sizeof(float) * numVertexLines * 4;
         indexDataSize = sizeof(unsigned) * numIndexLines * 3;
-        numIndices = numVertexLines * 3;
+        numIndices = numIndexLines * 3;
 
         // To satisfy std430 requirements for `vec3`s.
         vertexData = (float *)malloc(vertexDataSize);

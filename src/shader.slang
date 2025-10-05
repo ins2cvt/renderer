@@ -24,7 +24,7 @@ VertexOutput vertexShader(VertexInput input) {
     VertexOutput output;
     output.pos = mul(ubo.proj, mul(ubo.view, mul(ubo.model, float4(input.pos, 1.0f))));
     // TODO: Make this use the camera angle push constant.
-    output.color = float3(abs(input.pos.y) * 10.0f, abs(input.pos.x) * 10.0f, 1.0f);
+    output.color = float3(abs(input.pos.y) * 10.0f, abs(input.pos.x) * 10.0f, abs(input.pos.z) * 10.0f);
     return output;
 };
 
