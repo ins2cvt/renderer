@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <processthreadsapi.h>
+#include <synchapi.h>
 
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
@@ -1430,7 +1431,7 @@ public:
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = commandPool,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = numSwapchainImages,
+            .commandBufferCount = MAX_FRAMES_IN_FLIGHT,
         };
 
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1786,6 +1787,16 @@ public:
         HWND windowHandle = CreateWindowExA(NULL, MAKEINTATOM(windowClass), "Invert", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, NULL, NULL, hInstance, this);
 
         ShowWindow(windowHandle, SW_NORMAL);
+    }
+
+    ~Window() {
+        renderer.reset();
+
+        if (rendererThread != NULL)
+        {
+            WaitForSingleObject(rendererThread, INFINITE);
+            CloseHandle(rendererThread);
+        }
     }
 
     static LRESULT WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
