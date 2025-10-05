@@ -404,7 +404,6 @@ public:
     {
         shouldDestruct = true;
 
-        // Waits for any loops to finish.
         while (canDestruct == false)
             ;
 
@@ -445,8 +444,9 @@ public:
             for (auto &semaphore : renderFinishedSemaphores)
                 if (semaphore != NULL)
                     vkDestroySemaphore(device, semaphore, NULL);
-            if (commandBuffers.size() > 0)
-                vkFreeCommandBuffers(device, commandPool, MAX_FRAMES_IN_FLIGHT, commandBuffers.data());
+            for (auto &commandBuffer : commandBuffers)
+                if (commandBuffer != NULL)
+                    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
             if (transferCommandBuffer != NULL)
                 vkFreeCommandBuffers(device, transferCommandPool, 1, &transferCommandBuffer);
             if (commandPool != NULL)
@@ -615,7 +615,6 @@ public:
             createSwapchain();
             if (shouldDestruct)
             {
-                canDestruct = true;
                 return;
             }
         }
@@ -742,7 +741,7 @@ public:
         transitionSwapchainImageLayout(imageIndex, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
         transitionImageLayout(depthImage, VK_FORMAT_D32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-        VkClearValue clearColor = {0.5f, 0.0f, 0.0f, 1.0f};
+        VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
         VkRenderingAttachmentInfo colorAttachmentInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = swapchainImageViews[imageIndex],
@@ -1107,7 +1106,6 @@ public:
             createSwapchain();
             if (shouldDestruct)
             {
-                canDestruct = true;
                 return;
             }
         }
@@ -1860,7 +1858,7 @@ DWORD createRendererThread(LPVOID lpParameter)
 {
     Window *window = (Window *)lpParameter;
 
-    window->renderer = std::make_unique<Renderer>((WindowInterface *)lpParameter);
+    window->renderer = std::move(std::make_unique<Renderer>((WindowInterface *)lpParameter));
 
     window->renderer->mainLoop();
 
