@@ -16,6 +16,7 @@
 #include <chrono>
 #include <utility>
 #include <atomic>
+#include <thread>
 
 // MARK: Obj loader
 
@@ -401,8 +402,32 @@ public:
 
     ~Renderer()
     {
+        shouldDestruct = true;
+
+        // Waits for any loops to finish.
+        while (canDestruct == false)
+            ;
+
         if (device != NULL)
         {
+            if (depthImageMemory != NULL)
+                vkFreeMemory(device, depthImageMemory, NULL);
+            if (depthImage != NULL)
+                vkDestroyImage(device, depthImage, NULL);
+            for (auto &descriptorSetLayout : descriptorSetLayouts)
+                if (descriptorSetLayout != NULL)
+                    vkDestroyDescriptorSetLayout(device, descriptorSetLayout, NULL);
+            if (descriptorPool != NULL)
+                vkDestroyDescriptorPool(device, descriptorPool, NULL);
+            for (auto &uniformBufferMemory : uniformBuffersMemory)
+                if (uniformBufferMemory != NULL)
+                {
+                    vkUnmapMemory(device, uniformBufferMemory);
+                    vkFreeMemory(device, uniformBufferMemory, NULL);
+                }
+            for (auto &uniformBuffer : uniformBuffers)
+                if (uniformBuffer != NULL)
+                    vkDestroyBuffer(device, uniformBuffer, NULL);
             if (vertexBuffer != NULL)
                 vkDestroyBuffer(device, vertexBuffer, NULL);
             if (vertexBufferMemory != NULL)
@@ -423,7 +448,7 @@ public:
             if (commandBuffers.size() > 0)
                 vkFreeCommandBuffers(device, commandPool, MAX_FRAMES_IN_FLIGHT, commandBuffers.data());
             if (transferCommandBuffer != NULL)
-                vkFreeCommandBuffers(device, commandPool, 1, &transferCommandBuffer);
+                vkFreeCommandBuffers(device, transferCommandPool, 1, &transferCommandBuffer);
             if (commandPool != NULL)
                 vkDestroyCommandPool(device, commandPool, NULL);
             if (transferCommandPool != NULL)
@@ -455,12 +480,14 @@ public:
 
     void mainLoop()
     {
-        for (;;)
+        while (shouldDestruct == false)
         {
             drawFrame();
         }
 
         vkDeviceWaitIdle(device);
+
+        canDestruct = true;
     }
 
     void handleFramebufferResize(Dimensions dimensions)
@@ -584,7 +611,14 @@ public:
 
         cleanupSwapchain();
         while (swapchain == NULL)
+        {
             createSwapchain();
+            if (shouldDestruct)
+            {
+                canDestruct = true;
+                return;
+            }
+        }
         createDepthResources();
     }
 
@@ -605,7 +639,7 @@ public:
         // TODO: Use the right GLM define so that angles can be input in degrees.
         ubo.model = glm::rotate(glm::mat4(1.0f), elapsed * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.view = glm::lookAt(cameraPosition, cameraFocus, glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.proj = glm::perspective(glm::radians(45.0f), (float)extent.width / (float)extent.height, 0.1f, 10.0f);
+        ubo.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 10.0f);
 
         memcpy(uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
     }
@@ -708,7 +742,7 @@ public:
         transitionSwapchainImageLayout(imageIndex, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT);
         transitionImageLayout(depthImage, VK_FORMAT_D32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-        VkClearValue clearColor = {0.0f, 0.0f, 0.0f, 1.0f};
+        VkClearValue clearColor = {0.5f, 0.0f, 0.0f, 1.0f};
         VkRenderingAttachmentInfo colorAttachmentInfo = {
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = swapchainImageViews[imageIndex],
@@ -1042,7 +1076,12 @@ public:
 
         vkQueueSubmit(transferQueue, 1, &submitInfo, NULL);
 
-        vkQueueWaitIdle(transferQueue);
+        vkDeviceWaitIdle(device);
+
+        vkFreeMemory(device, stagingMemory, NULL);
+        vkDestroyBuffer(device, stagingBuffer, NULL);
+        vkFreeMemory(device, transferBufferMemory, NULL);
+        vkDestroyBuffer(device, transferBuffer, NULL);
     }
 
     uint32_t getBufferMemoryTypeBitOrder(VkMemoryRequirements requirements, VkMemoryPropertyFlagBits requestedProperties)
@@ -1064,7 +1103,14 @@ public:
     void initializeVulkanResources()
     {
         while (swapchain == NULL)
+        {
             createSwapchain();
+            if (shouldDestruct)
+            {
+                canDestruct = true;
+                return;
+            }
+        }
 
         // Vertex  buffer creation.
 
@@ -1659,6 +1705,8 @@ private:
 
     // TODO: Replace with proper interface after factoring parent class out.
     WindowInterface *windowInterface = nullptr;
+    std::atomic<bool> shouldDestruct = false;
+    std::atomic<bool> canDestruct = false;
 
     VkInstance instance = NULL;
     VkDebugUtilsMessengerEXT messenger = NULL;
