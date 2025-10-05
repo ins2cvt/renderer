@@ -14,6 +14,8 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <utility>
+#include <atomic>
 
 // MARK: Obj loader
 
@@ -395,7 +397,6 @@ public:
     {
         initializeVulkan();
         initializeVulkanResources();
-        mainLoop();
     }
 
     ~Renderer()
@@ -464,10 +465,17 @@ public:
 
     void handleFramebufferResize(Dimensions dimensions)
     {
-        extent = {
+        // Ignore if the previous pending extent hasn't been picked up.
+        if (framebufferResized == true)
+            return;
+
+        pendingExtent = {
             .width = dimensions.width,
             .height = dimensions.height,
         };
+
+        printf("Framebuffer resized: %u x %u\n", dimensions.width, dimensions.height);
+
         framebufferResized = true;
     }
 
@@ -515,6 +523,12 @@ public:
             .clipped = VK_TRUE,
         };
 
+        if (swapchainInfo.imageExtent.width == 0 || swapchainInfo.imageExtent.height == 0)
+        {
+            printf("Aborting swapchain creation due to dimension of 0 size\n");
+            return;
+        }
+
         if (vkCreateSwapchainKHR(device, &swapchainInfo, NULL, &swapchain) != VK_SUCCESS)
             printf("Failed to create swapchain\n");
 
@@ -548,11 +562,20 @@ public:
     void cleanupSwapchain()
     {
         if (depthImageView != NULL)
+        {
             vkDestroyImageView(device, depthImageView, NULL);
+            depthImageView = NULL;
+        }
         for (auto &view : swapchainImageViews)
+        {
             vkDestroyImageView(device, view, NULL);
+            view = NULL;
+        }
         if (swapchain != NULL)
+        {
             vkDestroySwapchainKHR(device, swapchain, NULL);
+            swapchain = NULL;
+        }
     }
 
     void recreateSwapchain()
@@ -560,7 +583,8 @@ public:
         vkDeviceWaitIdle(device);
 
         cleanupSwapchain();
-        createSwapchain();
+        while (swapchain == NULL)
+            createSwapchain();
         createDepthResources();
     }
 
@@ -629,7 +653,9 @@ public:
 
         if (result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_OUT_OF_DATE_KHR)
         {
+            extent = pendingExtent;
             framebufferResized = false;
+
             recreateSwapchain();
         }
         else if (result != VK_SUCCESS)
@@ -1037,7 +1063,8 @@ public:
 
     void initializeVulkanResources()
     {
-        createSwapchain();
+        while (swapchain == NULL)
+            createSwapchain();
 
         // Vertex  buffer creation.
 
@@ -1650,9 +1677,10 @@ private:
     std::vector<VkImage> swapchainImages = {};
     std::vector<VkImageView> swapchainImageViews = {};
     VkSurfaceFormatKHR swapchainSurfaceFormat = {};
-    bool framebufferResized = false;
+    std::atomic<bool> framebufferResized = false;
     VkViewport viewport = {};
     VkExtent2D extent = {};
+    VkExtent2D pendingExtent = {};
 
     VkImage depthImage = NULL;
     VkDeviceMemory depthImageMemory = NULL;
@@ -1782,9 +1810,11 @@ public:
 
 DWORD createRendererThread(LPVOID lpParameter)
 {
-    std::unique_ptr<Renderer> renderer = std::make_unique<Renderer>((WindowInterface *)lpParameter);
+    Window *window = (Window *)lpParameter;
 
-    ((Window *)lpParameter)->renderer = std::move(renderer);
+    window->renderer = std::make_unique<Renderer>((WindowInterface *)lpParameter);
+
+    window->renderer->mainLoop();
 
     return 0;
 }
