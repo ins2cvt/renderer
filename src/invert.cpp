@@ -445,11 +445,6 @@ public:
             for (auto &semaphore : renderFinishedSemaphores)
                 if (semaphore != NULL)
                     vkDestroySemaphore(device, semaphore, NULL);
-            for (auto &commandBuffer : commandBuffers)
-                if (commandBuffer != NULL)
-                    vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
-            if (transferCommandBuffer != NULL)
-                vkFreeCommandBuffers(device, transferCommandPool, 1, &transferCommandBuffer);
             if (commandPool != NULL)
                 vkDestroyCommandPool(device, commandPool, NULL);
             if (transferCommandPool != NULL)
@@ -632,15 +627,17 @@ public:
 
         UniformBufferObject ubo = {};
 
-        glm::vec3 cameraPosition = glm::vec3(0.25f, 0.25f, 0.25f);
+        glm::vec3 cameraPosition = glm::vec3(0.0f, 0.0f, 1.0f);
         glm::vec3 cameraFocus = glm::vec3(0.0f, 0.0f, 0.0f);
+        glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
         cameraAngle = cameraFocus - cameraPosition;
 
         // TODO: Use the right GLM define so that angles can be input in degrees.
-        ubo.model = glm::rotate(glm::mat4(1.0f), elapsed * glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-        ubo.view = glm::lookAt(cameraPosition, cameraFocus, glm::vec3(0.0f, 0.0f, 1.0f));
+        ubo.model = glm::mat4(1.0f);
+        ubo.view = glm::lookAt(cameraPosition, cameraFocus, cameraUp);
+        ubo.view = glm::rotate(ubo.view, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         ubo.proj = glm::perspective(glm::radians(45.0f), static_cast<float>(extent.width) / static_cast<float>(extent.height), 0.1f, 10.0f);
-
+        
         memcpy(uniformBuffersMapped[frameIndex], &ubo, sizeof(ubo));
     }
 
